@@ -1,0 +1,16 @@
+.env
+.venv/
+# Only for accidental local-cache runs; normal uv commands use the global cache.
+.uv-cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+.idea
+.DS_store

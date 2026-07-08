@@ -1,0 +1,23 @@
+[project]
+name = "sjtuclaw"
+version = "0.1.0"
+description = "A minimal agent runtime for the SJTUClaw course project."
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=2.44.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["claw*"]
