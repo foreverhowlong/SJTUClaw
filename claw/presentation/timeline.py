@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
 from claw.messages import Message
 
@@ -15,6 +15,7 @@ ToolStatus = Literal["running", "succeeded", "failed", "awaiting_approval"]
 class TextTimelineItem(TypedDict):
     type: Literal["user_message", "assistant_message", "working_note"]
     content: str
+    source: NotRequired[Literal["scheduled_task"]]
 
 
 class ToolActivityItem(TypedDict):
@@ -53,7 +54,13 @@ def build_conversation_timeline(messages: Sequence[Message]) -> list[TimelineIte
     for message in messages:
         role = message["role"]
         if role == "user":
-            timeline.append({"type": "user_message", "content": message["content"]})
+            item: TextTimelineItem = {
+                "type": "user_message",
+                "content": message["content"],
+            }
+            if message.get("source") == "scheduled_task":
+                item["source"] = "scheduled_task"
+            timeline.append(item)
             continue
         if role == "assistant" and "tool_calls" not in message:
             timeline.append(

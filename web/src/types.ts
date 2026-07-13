@@ -14,6 +14,7 @@ export interface ConversationMessage {
   name?: string;
   tool_call_id?: string;
   tool_calls?: unknown[];
+  source?: "scheduled_task";
 }
 
 export interface SessionDetail extends SessionSummary {
@@ -26,6 +27,7 @@ export interface SessionDetail extends SessionSummary {
 export interface TextTimelineItem {
   type: "user_message" | "assistant_message" | "working_note";
   content: string;
+  source?: "scheduled_task";
 }
 
 export type ToolActivityStatus =
@@ -62,6 +64,52 @@ export interface AttachmentMetadata {
   uploadedAt: string;
 }
 
+export type ScheduledTaskStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type TaskSchedule =
+  | { type: "once"; runAt: string }
+  | {
+      type: "interval";
+      startAt: string;
+      intervalSeconds: number;
+    };
+
+export interface TaskExecution {
+  executionId: string;
+  scheduledFor: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: "running" | "succeeded" | "failed";
+  assistantReply: string;
+  errorCode: string;
+  errorMessage: string;
+}
+
+export interface ScheduledTask {
+  schemaVersion: 1;
+  taskId: string;
+  sessionId: string;
+  content: string;
+  schedule: TaskSchedule;
+  nextRunAt: string | null;
+  status: ScheduledTaskStatus;
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
+  history: TaskExecution[];
+}
+
+export interface CreateScheduledTaskInput {
+  sessionId: string;
+  content: string;
+  schedule: TaskSchedule;
+}
+
 export interface AgentEvent {
   type: string;
   sessionId: string;
@@ -85,6 +133,11 @@ export type GatewayMessage =
       type: "gateway_error";
       requestId: string;
       error: { code: string; message: string };
+    }
+  | {
+      type: "session_updated";
+      sessionId: string;
+      reason: "scheduled_task";
     };
 
 export interface SessionRunState {

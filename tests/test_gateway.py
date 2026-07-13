@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import json
 
 from starlette.testclient import TestClient
 
 from claw.events import AgentEvent
+from claw.scheduler import Scheduler
 from claw.store.attachments import AttachmentStore
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
+from claw.store.tasks import TaskStore
 from gateway.app import create_app
 
 
@@ -17,7 +20,7 @@ class FakeAgent:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    async def run_turn(self, session_id: str, user_input: str):
+    async def run_turn(self, session_id: str, user_input: str, *, source=None):
         self.calls.append((session_id, user_input))
         yield AgentEvent("turn_start", session_id, {"userInput": user_input})
         yield AgentEvent("llm_delta", session_id, {"delta": "你好"})
@@ -26,7 +29,7 @@ class FakeAgent:
 
 
 class FakeToolAgent(FakeAgent):
-    async def run_turn(self, session_id: str, user_input: str):
+    async def run_turn(self, session_id: str, user_input: str, *, source=None):
         yield AgentEvent("turn_start", session_id, {"userInput": user_input})
         yield AgentEvent(
             "tool_call",
@@ -55,21 +58,54 @@ class FakeToolAgent(FakeAgent):
         yield AgentEvent("turn_end", session_id, {"status": "completed"})
 
 
+class PersistingAgent(FakeAgent):
+    def __init__(self, sessions: SessionStore) -> None:
+        super().__init__()
+        self.sessions = sessions
+
+    async def run_turn(self, session_id: str, user_input: str, *, source=None):
+        snapshot = self.sessions.load(session_id)
+        user_message = {"role": "user", "content": user_input}
+        if source is not None:
+            user_message["source"] = source
+        self.sessions.commit_turn(
+            session_id,
+            expected_revision=snapshot.revision,
+            messages=[
+                user_message,
+                {"role": "assistant", "content": "scheduled reply"},
+            ],
+        )
+        yield AgentEvent("llm_message", session_id, {"content": "scheduled reply"})
+        yield AgentEvent("turn_end", session_id, {"status": "completed"})
+
+
 @dataclass
 class FakeRuntime:
     session_store: SessionStore
     memory_store: MemoryStore
     attachment_store: AttachmentStore
     agent: FakeAgent
+    task_store: TaskStore
+    scheduler: Scheduler
 
 
 def make_runtime(tmp_path) -> FakeRuntime:
     sessions = SessionStore(tmp_path / "sessions")
+    agent = FakeAgent()
+    task_store = TaskStore(tmp_path / "tasks")
     return FakeRuntime(
         session_store=sessions,
         memory_store=MemoryStore(tmp_path / "memory"),
         attachment_store=AttachmentStore(sessions, max_bytes=16),
-        agent=FakeAgent(),
+        agent=agent,
+        task_store=task_store,
+        scheduler=Scheduler(
+            task_store,
+            sessions,
+            agent,
+            poll_interval_seconds=60,
+        ),
     )
 
 
@@ -269,6 +305,49 @@ def test_websocket_rejects_unknown_session_but_stays_connected(tmp_path) -> None
     assert resolved["requestId"] == "good"
 
 
+def test_scheduler_broadcasts_session_update_to_connected_clients(tmp_path) -> None:
+    runtime = make_runtime(tmp_path)
+    agent = PersistingAgent(runtime.session_store)
+    current = [datetime(2026, 7, 14, tzinfo=timezone.utc)]
+    runtime.agent = agent
+    runtime.scheduler = Scheduler(
+        runtime.task_store,
+        runtime.session_store,
+        agent,
+        poll_interval_seconds=0.01,
+        now=lambda: current[0],
+    )
+    session = runtime.session_store.create()
+
+    with TestClient(create_app(runtime)) as client:
+        with client.websocket_connect("/ws/chat") as socket:
+            response = client.post(
+                "/api/tasks",
+                json={
+                    "sessionId": session.session_id,
+                    "content": "scheduled input",
+                    "schedule": {
+                        "type": "once",
+                        "runAt": "2026-07-14T00:00:01Z",
+                    },
+                },
+            )
+            current[0] += timedelta(seconds=1)
+            notification = socket.receive_json()
+
+    assert response.status_code == 201
+    assert notification == {
+        "type": "session_updated",
+        "sessionId": session.session_id,
+        "reason": "scheduled_task",
+    }
+    assert runtime.session_store.load(session.session_id).messages[0] == {
+        "role": "user",
+        "content": "scheduled input",
+        "source": "scheduled_task",
+    }
+
+
 def test_attachment_api_is_session_scoped_and_reports_limit(tmp_path) -> None:
     runtime = make_runtime(tmp_path)
     first = runtime.session_store.create()
@@ -294,3 +373,62 @@ def test_attachment_api_is_session_scoped_and_reports_limit(tmp_path) -> None:
     assert first_list.json()["attachments"][0]["filename"] == "brief.txt"
     assert second_list.json()["attachments"] == []
     assert oversized.status_code == 413
+
+
+def test_task_api_creates_lists_reads_and_cancels_persisted_task(tmp_path) -> None:
+    runtime = make_runtime(tmp_path)
+    session = runtime.session_store.create("Scheduled work")
+    run_at = datetime.now(timezone.utc) + timedelta(hours=1)
+
+    with TestClient(create_app(runtime)) as client:
+        created = client.post(
+            "/api/tasks",
+            json={
+                "sessionId": session.session_id,
+                "content": "summarize progress",
+                "schedule": {"type": "once", "runAt": run_at.isoformat()},
+            },
+        )
+        task_id = created.json()["taskId"]
+        listed = client.get("/api/tasks")
+        detail = client.get(f"/api/tasks/{task_id}")
+        cancelled = client.post(f"/api/tasks/{task_id}/cancel")
+        conflict = client.post(f"/api/tasks/{task_id}/cancel")
+
+    assert created.status_code == 201
+    assert listed.json()["tasks"][0]["content"] == "summarize progress"
+    assert detail.json()["sessionId"] == session.session_id
+    assert cancelled.json()["status"] == "cancelled"
+    assert conflict.status_code == 409
+    assert runtime.task_store.get(task_id).status == "cancelled"
+
+
+def test_task_api_rejects_missing_session_and_past_time(tmp_path) -> None:
+    runtime = make_runtime(tmp_path)
+    session = runtime.session_store.create()
+    past = datetime.now(timezone.utc) - timedelta(minutes=1)
+
+    with TestClient(create_app(runtime)) as client:
+        missing = client.post(
+            "/api/tasks",
+            json={
+                "sessionId": "session_0123456789ab",
+                "content": "run",
+                "schedule": {
+                    "type": "interval",
+                    "startAt": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                    "intervalSeconds": 60,
+                },
+            },
+        )
+        expired = client.post(
+            "/api/tasks",
+            json={
+                "sessionId": session.session_id,
+                "content": "run",
+                "schedule": {"type": "once", "runAt": past.isoformat()},
+            },
+        )
+
+    assert missing.status_code == 404
+    assert expired.status_code == 400

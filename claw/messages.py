@@ -5,6 +5,9 @@ from __future__ import annotations
 from typing import Literal, NotRequired, TypeAlias, TypedDict
 
 
+MessageSource: TypeAlias = Literal["scheduled_task"]
+
+
 class FunctionCallPayload(TypedDict):
     name: str
     arguments: str
@@ -19,6 +22,7 @@ class ToolCallPayload(TypedDict):
 class TextMessage(TypedDict):
     role: Literal["system", "user", "assistant"]
     content: str
+    source: NotRequired[MessageSource]
 
 
 class AssistantToolMessage(TypedDict):

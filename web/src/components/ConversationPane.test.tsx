@@ -66,6 +66,29 @@ describe("ConversationPane", () => {
     expect(link.getAttribute("rel")).toContain("noopener");
   });
 
+  it("labels scheduled instructions separately from manual user messages", () => {
+    render(
+      <ConversationPane
+        detail={detail([
+          {
+            type: "user_message",
+            content: "生成日报",
+            source: "scheduled_task",
+          },
+          { type: "assistant_message", content: "日报已生成。" },
+        ])}
+        run={EMPTY_RUN}
+        connection="connected"
+        loading={false}
+        onSend={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("SCHEDULED TASK")).toBeTruthy();
+    expect(screen.queryByText("YOU")).toBeNull();
+    expect(screen.getByText("生成日报").closest(".message-scheduled")).toBeTruthy();
+  });
+
   it("renders persisted and live tools between working notes and replies", () => {
     render(
       <ConversationPane

@@ -90,6 +90,55 @@ def test_agent_runs_streamed_turns_for_explicit_session(tmp_path) -> None:
     ]
 
 
+def test_agent_serializes_concurrent_turns_for_the_same_session(tmp_path) -> None:
+    class GatedLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def stream_chat(self, messages, tools=()):
+            del messages, tools
+            self.calls += 1
+            call_number = self.calls
+            if call_number == 1:
+                self.started.set()
+                await self.release.wait()
+            yield LLMStreamEvent(
+                "completed",
+                completion=LLMCompletion(f"reply {call_number}"),
+            )
+
+    store = SessionStore(tmp_path / "sessions")
+    session_id = store.create().session_id
+    llm = GatedLLM()
+    agent = AgentService(
+        llm,
+        store,
+        ContextBuilder("system", "soul"),
+        MemoryStore(tmp_path / "memory"),
+        tool_registry=ToolRegistry(),
+    )
+
+    async def scenario():
+        first = asyncio.create_task(collect(agent, session_id, "first"))
+        await llm.started.wait()
+        second = asyncio.create_task(collect(agent, session_id, "second"))
+        await asyncio.sleep(0.01)
+        assert llm.calls == 1
+        llm.release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(scenario())
+
+    assert store.load(session_id).messages == [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply 1"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "reply 2"},
+    ]
+
+
 def test_agent_executes_tool_and_persists_complete_protocol_turn(tmp_path) -> None:
     registry = ToolRegistry()
     registry.register(

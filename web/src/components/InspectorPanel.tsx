@@ -1,23 +1,42 @@
 import { useRef, useState } from "react";
 
-import type { AttachmentMetadata } from "../types";
+import type {
+  AttachmentMetadata,
+  CreateScheduledTaskInput,
+  ScheduledTask,
+  SessionSummary,
+} from "../types";
+import { ScheduledTasksPanel } from "./ScheduledTasksPanel";
 
 interface Props {
   className?: string;
   attachments: AttachmentMetadata[];
+  sessions: SessionSummary[];
+  activeSessionId: string | null;
+  tasks: ScheduledTask[];
+  tasksLoading: boolean;
   disabled: boolean;
   onUpload: (file: File) => Promise<void>;
+  onCreateTask: (input: CreateScheduledTaskInput) => Promise<unknown>;
+  onCancelTask: (taskId: string) => Promise<unknown>;
   onClose: () => void;
 }
 
 export function InspectorPanel({
   className = "",
   attachments,
+  sessions,
+  activeSessionId,
+  tasks,
+  tasksLoading,
   disabled,
   onUpload,
+  onCreateTask,
+  onCancelTask,
   onClose,
 }: Props) {
   const [uploading, setUploading] = useState(false);
+  const [tab, setTab] = useState<"files" | "tasks">("files");
   const inputRef = useRef<HTMLInputElement>(null);
 
   const selectFile = async (file?: File) => {
@@ -35,15 +54,34 @@ export function InspectorPanel({
     <aside className={`inspector drawer-panel ${className}`}>
       <div className="inspector-topline">
         <div className="inspector-title">
-          <span className="micro-label">SESSION FILES</span>
-          <span className="file-count">{attachments.length}</span>
+          <span className="micro-label">{tab === "files" ? "SESSION FILES" : "TASKS"}</span>
+          <span className="file-count">{tab === "files" ? attachments.length : tasks.length}</span>
         </div>
         <button className="drawer-close" type="button" onClick={onClose} aria-label="关闭">
           ×
         </button>
       </div>
 
-      <div className="files-panel">
+      <div className="inspector-body">
+        <div className="inspector-tabs" role="tablist" aria-label="Inspector sections">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "files"}
+            onClick={() => setTab("files")}
+          >
+            FILES
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "tasks"}
+            onClick={() => setTab("tasks")}
+          >
+            TASKS
+          </button>
+        </div>
+        {tab === "files" ? <div className="files-panel">
         <div className="files-intro">
           <span className="micro-label">SESSION ATTACHMENTS</span>
           <p>附件只属于当前 session，不会成为 workspace 文件。</p>
@@ -78,6 +116,16 @@ export function InspectorPanel({
             </article>
           ))}
         </div>
+        </div> : (
+          <ScheduledTasksPanel
+            sessions={sessions}
+            activeSessionId={activeSessionId}
+            tasks={tasks}
+            loading={tasksLoading}
+            onCreate={onCreateTask}
+            onCancel={onCancelTask}
+          />
+        )}
       </div>
     </aside>
   );

@@ -21,6 +21,7 @@ import type {
   SessionSummary,
 } from "./types";
 import { useGatewaySocket } from "./useGatewaySocket";
+import { useScheduledTasks } from "./useScheduledTasks";
 
 export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -34,6 +35,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
+  const reportTaskError = useCallback((message: string) => setError(message), []);
+  const scheduled = useScheduledTasks(reportTaskError);
 
   const refreshSessions = useCallback(async () => {
     const items = await listSessions();
@@ -95,6 +98,14 @@ export default function App() {
 
   const handleGatewayMessage = useCallback(
     (message: GatewayMessage) => {
+      if (message.type === "session_updated") {
+        void Promise.all([
+          loadSession(message.sessionId),
+          refreshSessions(),
+        ]).catch((reason) => setError(errorMessage(reason)));
+        return;
+      }
+
       if (message.type === "gateway_error") {
         setError(message.error.message);
         setRuns((previous) => {
@@ -301,7 +312,7 @@ export default function App() {
               className="mobile-toggle"
               type="button"
               onClick={() => setRightOpen(true)}
-              aria-label="打开 Session Files"
+              aria-label="打开 Inspector"
             >
               ◫
             </button>
@@ -341,8 +352,14 @@ export default function App() {
           <InspectorPanel
             className={rightOpen ? "is-open" : ""}
             attachments={activeAttachments}
+            sessions={sessions}
+            activeSessionId={activeSessionId}
+            tasks={scheduled.tasks}
+            tasksLoading={scheduled.loading}
             disabled={!activeSessionId}
             onUpload={handleUpload}
+            onCreateTask={scheduled.create}
+            onCancelTask={scheduled.cancel}
             onClose={() => setRightOpen(false)}
           />
         </div>

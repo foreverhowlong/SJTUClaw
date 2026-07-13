@@ -1,5 +1,7 @@
 import type {
   AttachmentMetadata,
+  CreateScheduledTaskInput,
+  ScheduledTask,
   SessionDetail,
   SessionSummary,
 } from "./types";
@@ -71,4 +73,25 @@ export function uploadAttachment(
     `/api/sessions/${sessionId}/attachments`,
     { method: "POST", body: data },
   );
+}
+
+export async function listScheduledTasks(): Promise<ScheduledTask[]> {
+  const body = await request<{ tasks: ScheduledTask[] }>("/api/tasks");
+  return body.tasks;
+}
+
+export function createScheduledTask(
+  input: CreateScheduledTaskInput,
+): Promise<ScheduledTask> {
+  return request<ScheduledTask>("/api/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function cancelScheduledTask(taskId: string): Promise<ScheduledTask> {
+  return request<ScheduledTask>(`/api/tasks/${taskId}/cancel`, {
+    method: "POST",
+  });
 }

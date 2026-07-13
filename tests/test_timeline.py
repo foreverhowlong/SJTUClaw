@@ -59,6 +59,26 @@ def test_timeline_pairs_working_notes_calls_and_results_in_order() -> None:
     ]
 
 
+def test_timeline_preserves_scheduled_task_source_for_presentation() -> None:
+    messages: list[Message] = [
+        {
+            "role": "user",
+            "content": "生成日报",
+            "source": "scheduled_task",
+        },
+        {"role": "assistant", "content": "日报已生成。"},
+    ]
+
+    assert build_conversation_timeline(messages) == [
+        {
+            "type": "user_message",
+            "content": "生成日报",
+            "source": "scheduled_task",
+        },
+        {"type": "assistant_message", "content": "日报已生成。"},
+    ]
+
+
 def test_timeline_handles_multiple_calls_failure_and_attachment_filename() -> None:
     messages: list[Message] = [
         {

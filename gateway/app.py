@@ -17,12 +17,21 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
-from claw.errors import AttachmentError, ClawError, SessionError
+from claw.errors import (
+    AttachmentError,
+    ClawError,
+    SessionError,
+    TaskConflictError,
+    TaskError,
+    TaskNotFoundError,
+)
 from claw.events import AgentEvent
 from claw.presentation.timeline import build_conversation_timeline, tool_activity
-from claw.runtime import ClawRuntime, build_runtime
+from claw.runtime import ClawRuntime, build_runtime, serve_runtime
 from claw.session import Session
 from claw.store.sessions import SessionSummary
+from gateway.realtime import GatewayConnection, GatewayConnectionHub
+from gateway.task_routes import router as task_router
 
 
 logger = logging.getLogger(__name__)
@@ -48,7 +57,15 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
         if not hasattr(app.state, "runtime"):
             app.state.runtime = build_runtime()
         app.state.session_locks = {}
-        yield
+        app.state.connection_hub = GatewayConnectionHub()
+        unsubscribe = app.state.runtime.scheduler.subscribe_session_updates(
+            lambda session_id: _broadcast_session_updated(app, session_id)
+        )
+        try:
+            async with serve_runtime(app.state.runtime):
+                yield
+        finally:
+            unsubscribe()
 
     app = FastAPI(
         title="SJTUClaw Gateway",
@@ -76,6 +93,18 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
     async def handle_attachment_error(_request: Request, exc: AttachmentError):
         status = 413 if "大小限制" in str(exc) else 400
         return _error_response(status, "attachment_error", str(exc))
+
+    @app.exception_handler(TaskNotFoundError)
+    async def handle_task_not_found(_request: Request, exc: TaskNotFoundError):
+        return _error_response(404, "task_not_found", str(exc))
+
+    @app.exception_handler(TaskConflictError)
+    async def handle_task_conflict(_request: Request, exc: TaskConflictError):
+        return _error_response(409, "task_conflict", str(exc))
+
+    @app.exception_handler(TaskError)
+    async def handle_task_error(_request: Request, exc: TaskError):
+        return _error_response(400, "task_error", str(exc))
 
     @app.exception_handler(ClawError)
     async def handle_claw_error(_request: Request, exc: ClawError):
@@ -144,66 +173,72 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
 
     @app.websocket("/ws/chat")
     async def chat(websocket: WebSocket) -> None:
-        await websocket.accept()
-        while True:
-            try:
-                raw = await websocket.receive_text()
-            except WebSocketDisconnect:
-                return
+        connection = await _connection_hub(websocket.app).connect(websocket)
+        try:
+            while True:
+                try:
+                    raw = await websocket.receive_text()
+                except WebSocketDisconnect:
+                    return
 
-            request_id = f"request_{uuid4().hex[:12]}"
-            try:
-                value = json.loads(raw)
-                request_id, session_id, message = _parse_turn_request(
-                    value,
-                    request_id,
-                )
-                active_runtime: ClawRuntime = websocket.app.state.runtime
-                created = session_id is None
-                if created:
-                    session = active_runtime.session_store.create()
-                    session_id = session.session_id
-                else:
-                    session = active_runtime.session_store.load(session_id)
+                request_id = f"request_{uuid4().hex[:12]}"
+                try:
+                    value = json.loads(raw)
+                    request_id, session_id, message = _parse_turn_request(
+                        value,
+                        request_id,
+                    )
+                    active_runtime: ClawRuntime = websocket.app.state.runtime
+                    created = session_id is None
+                    if created:
+                        session = active_runtime.session_store.create()
+                        session_id = session.session_id
+                    else:
+                        session = active_runtime.session_store.load(session_id)
 
-                await websocket.send_json(
-                    {
-                        "type": "session_resolved",
-                        "requestId": request_id,
-                        "created": created,
-                        "session": _session_detail(session),
-                    }
-                )
-                async with _session_lock(websocket.app, session_id):
+                    await connection.send_json(
+                        {
+                            "type": "session_resolved",
+                            "requestId": request_id,
+                            "created": created,
+                            "session": _session_detail(session),
+                        }
+                    )
                     live_tools: dict[str, tuple[str, str]] = {}
                     async for event in active_runtime.agent.run_turn(
                         session_id,
                         message,
                     ):
-                        await websocket.send_json(
+                        await connection.send_json(
                             {
                                 "type": "agent_event",
                                 "requestId": request_id,
                                 "event": _web_event(event, live_tools),
                             }
                         )
-            except WebSocketDisconnect:
-                return
-            except (ClawError, ValueError, TypeError, json.JSONDecodeError) as exc:
-                await _send_gateway_error(
-                    websocket,
-                    request_id,
-                    "invalid_request",
-                    str(exc),
-                )
-            except Exception:
-                logger.exception("gateway websocket request failed: %s", request_id)
-                await _send_gateway_error(
-                    websocket,
-                    request_id,
-                    "gateway_error",
-                    "Gateway 处理请求时发生内部错误。",
-                )
+                except WebSocketDisconnect:
+                    return
+                except (ClawError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                    await _send_gateway_error(
+                        connection,
+                        request_id,
+                        "invalid_request",
+                        str(exc),
+                    )
+                except Exception:
+                    logger.exception(
+                        "gateway websocket request failed: %s", request_id
+                    )
+                    await _send_gateway_error(
+                        connection,
+                        request_id,
+                        "gateway_error",
+                        "Gateway 处理请求时发生内部错误。",
+                    )
+        finally:
+            _connection_hub(websocket.app).disconnect(connection)
+
+    app.include_router(task_router)
 
     web_dist = Path(__file__).resolve().parent.parent / "web" / "dist"
     if web_dist.is_dir():
@@ -316,16 +351,30 @@ def _parse_turn_request(
 
 
 async def _send_gateway_error(
-    websocket: WebSocket,
+    connection: GatewayConnection,
     request_id: str,
     code: str,
     message: str,
 ) -> None:
-    await websocket.send_json(
+    await connection.send_json(
         {
             "type": "gateway_error",
             "requestId": request_id,
             "error": {"code": code, "message": message},
+        }
+    )
+
+
+def _connection_hub(app: Any) -> GatewayConnectionHub:
+    return app.state.connection_hub
+
+
+async def _broadcast_session_updated(app: Any, session_id: str) -> None:
+    await _connection_hub(app).broadcast(
+        {
+            "type": "session_updated",
+            "sessionId": session_id,
+            "reason": "scheduled_task",
         }
     )
 

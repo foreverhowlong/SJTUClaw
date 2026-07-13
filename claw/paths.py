@@ -13,6 +13,7 @@ class RuntimePaths:
     env_file: Path
     sessions_dir: Path
     memory_dir: Path
+    tasks_dir: Path
     logs_dir: Path
     system_prompt_file: Path | None = None
     soul_file: Path | None = None
@@ -25,6 +26,7 @@ class RuntimePaths:
             env_file=home / ".env",
             sessions_dir=home / "data" / "sessions",
             memory_dir=home / "data" / "memory",
+            tasks_dir=home / "data" / "tasks",
             logs_dir=home / "logs",
             system_prompt_file=_optional_path("CLAW_SYSTEM_PROMPT"),
             soul_file=_optional_path("CLAW_SOUL"),

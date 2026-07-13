@@ -157,6 +157,7 @@ function TimelineEntry({
     <MessageBubble
       content={item.content}
       user={item.type === "user_message"}
+      scheduled={item.source === "scheduled_task"}
       workingNote={item.type === "working_note"}
       streaming={streaming}
     />
@@ -179,18 +180,28 @@ function MessageBubble({
   pending = false,
   streaming = false,
   workingNote = false,
+  scheduled = false,
 }: {
   content: string;
   user?: boolean;
   pending?: boolean;
   streaming?: boolean;
   workingNote?: boolean;
+  scheduled?: boolean;
 }) {
   return (
-    <article className={`message-row ${user ? "message-user" : "message-agent"}`}>
+    <article
+      className={`message-row ${user ? "message-user" : "message-agent"}${scheduled ? " message-scheduled" : ""}`}
+    >
       <div className="message-label">
         <span className="micro-label">
-          {user ? "YOU" : workingNote ? "CLAW / WORKING NOTE" : "CLAW"}
+          {user
+            ? scheduled
+              ? "SCHEDULED TASK"
+              : "YOU"
+            : workingNote
+              ? "CLAW / WORKING NOTE"
+              : "CLAW"}
         </span>
         {pending && <span className="pending-label">PENDING</span>}
       </div>

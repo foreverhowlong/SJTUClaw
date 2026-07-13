@@ -35,3 +35,15 @@ class MemoryError(ClawError):
 
 class CommandParseError(ClawError):
     """Raised when a local CLI command is unknown or malformed."""
+
+
+class TaskError(ClawError):
+    """Raised when a scheduled task is invalid or cannot be persisted."""
+
+
+class TaskNotFoundError(TaskError):
+    """Raised when a scheduled task does not exist."""
+
+
+class TaskConflictError(TaskError):
+    """Raised when a scheduled task transition is no longer valid."""

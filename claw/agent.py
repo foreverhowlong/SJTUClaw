@@ -14,7 +14,7 @@ from claw.context import ContextBuilder, TOOL_RESULT_PREVIEW_CHARS
 from claw.errors import LLMError, SessionError, ToolError
 from claw.events import AgentEvent
 from claw.llm import LLMStreamEvent
-from claw.messages import Message
+from claw.messages import Message, MessageSource, TextMessage
 from claw.session import Session
 from claw.store.attachments import AttachmentStore
 from claw.store.memory import MemoryStore
@@ -62,21 +62,38 @@ class AgentService:
         self._tools = tool_registry or build_read_only_registry()
         self._approval_policy = approval_policy or DenyAllPolicy()
         self._attachment_store = attachment_store
+        self._session_locks: dict[str, asyncio.Lock] = {}
 
     async def run_turn(
         self,
         session_id: str,
         user_input: str,
+        *,
+        source: MessageSource | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Run LLM -> tools -> LLM until a final answer is atomically committed."""
         if not user_input.strip():
             raise ValueError("user_input 不能为空。")
 
+        async with self._session_lock(session_id):
+            async for event in self._run_turn(session_id, user_input, source):
+                yield event
+
+    async def _run_turn(
+        self,
+        session_id: str,
+        user_input: str,
+        source: MessageSource | None,
+    ) -> AsyncIterator[AgentEvent]:
+
         yield AgentEvent("turn_start", session_id, {"userInput": user_input})
         try:
             tools = self._tools_for_session(session_id)
             definitions = tools.definitions()
-            working: list[Message] = [{"role": "user", "content": user_input}]
+            user_message: TextMessage = {"role": "user", "content": user_input}
+            if source is not None:
+                user_message["source"] = source
+            working: list[Message] = [user_message]
             snapshot = self._store.load(session_id)
             if self._compactor is not None:
                 request_chars = self._request_chars(
@@ -307,17 +324,21 @@ class AgentService:
         *,
         force: bool = True,
     ) -> CompactionResult:
-        if self._compactor is None:
-            snapshot = self._store.load(session_id)
-            return CompactionResult(
-                session_id=session_id,
-                status="unavailable",
-                old_message_count=0,
-                recent_message_count=snapshot.message_count,
-                summary=snapshot.summary,
-                detail="runtime 未配置 compactor，旧消息未删除。",
-            )
-        return await self._compactor.compact(session_id, force=force)
+        async with self._session_lock(session_id):
+            if self._compactor is None:
+                snapshot = self._store.load(session_id)
+                return CompactionResult(
+                    session_id=session_id,
+                    status="unavailable",
+                    old_message_count=0,
+                    recent_message_count=snapshot.message_count,
+                    summary=snapshot.summary,
+                    detail="runtime 未配置 compactor，旧消息未删除。",
+                )
+            return await self._compactor.compact(session_id, force=force)
+
+    def _session_lock(self, session_id: str) -> asyncio.Lock:
+        return self._session_locks.setdefault(session_id, asyncio.Lock())
 
 
 def _assistant_tool_message(

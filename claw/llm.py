@@ -157,6 +157,7 @@ def _provider_messages(messages: Sequence[Message]) -> list[Message]:
     projected: list[Message] = []
     for message in messages:
         copied = deepcopy(message)
+        copied.pop("source", None)
         if copied.get("role") == "tool":
             copied.pop("name", None)
         projected.append(copied)

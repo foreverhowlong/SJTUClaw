@@ -1,6 +1,6 @@
 # SJTUClaw
 
-SJTUClaw is a minimal agent runtime course project. The current implementation covers Step 6: persistent multi-session context, safe compaction, streamed OpenAI-compatible tool calling, a read-only environment feedback loop, and a shared FastAPI Gateway with a React command center.
+SJTUClaw is a minimal agent runtime course project. The current implementation covers Step 7: persistent multi-session context, safe compaction, streamed OpenAI-compatible tool calling, a read-only environment feedback loop, a shared FastAPI Gateway with a React command center, and persistent once/interval scheduled tasks.
 
 ## Setup
 
@@ -65,7 +65,9 @@ uv run python -m gateway
 Open `http://127.0.0.1:8000`. The Gateway serves the production Web build and
 uses the same `AgentService`, `SessionStore`, context builder, memory store,
 compactor, and tool registry as the CLI. It never sends the LLM API key to the
-browser.
+browser. This long-running Gateway process also activates the runtime-owned
+Scheduler; constructing a runtime or starting the ordinary CLI does not start
+background services implicitly.
 
 For frontend development, run the Gateway and Vite in separate terminals:
 
@@ -76,7 +78,7 @@ cd web && npm run dev
 
 Vite proxies `/api` and `/ws` to the local Gateway. The interface is a
 three-column agent command center: shared sessions on the left, persisted chat
-history in the middle, and session attachments on the right. Sessions can be
+history in the middle, and session attachments or scheduled tasks on the right. Sessions can be
 renamed or deleted from the left rail. Assistant messages render safe
 GitHub-flavored Markdown and KaTeX, while tool activities appear inline between
 working notes and final answers. Transport-only events such as turn boundaries
@@ -91,6 +93,9 @@ The REST surface is intentionally small:
 - `DELETE /api/sessions/{sessionId}` deletes a session and its attachments.
 - `GET /api/sessions/{sessionId}` returns persisted history.
 - `GET/POST /api/sessions/{sessionId}/attachments` lists or uploads attachments.
+- `GET/POST /api/tasks` lists or creates persistent tasks.
+- `GET /api/tasks/{taskId}` returns one task with its complete execution history.
+- `POST /api/tasks/{taskId}/cancel` cancels all future triggers without deleting history.
 
 `/ws/chat` accepts `run_turn` frames with `requestId`, optional `sessionId`, and
 `message`. A missing session ID creates a new session; an unknown ID returns a
@@ -101,8 +106,9 @@ responses include both the provider-neutral messages and this derived timeline.
 Transport failures use `gateway_error`. One failed request does not terminate
 the connection or server.
 
-Web requests for the same session are serialized inside the Gateway. Concurrent
-CLI updates remain protected by the SessionStore revision check.
+Agent turns for the same session are serialized inside `AgentService`, so Web,
+CLI, and Scheduler entry points share one concurrency boundary. Concurrent
+cross-process updates remain protected by the SessionStore revision check.
 
 ## Session attachments
 
@@ -119,6 +125,38 @@ adds a session-scoped `read_attachment` tool for UTF-8 text. The tool accepts an
 attachment ID, never exposes the server path, and returns at most 65,536
 characters. Attachments from another session, missing blobs, symbolic links,
 invalid UTF-8, and obvious binary content become ordinary tool failures.
+
+## Scheduler and persistent tasks
+
+The Scheduler is part of the core `claw` runtime, not the Gateway transport.
+`build_runtime()` only constructs the object graph. The Gateway explicitly enters
+the runtime service lifecycle because it is the project's long-running host;
+closing an ordinary CLI therefore cannot silently stop or start scheduled work.
+
+Tasks are stored independently under `data/tasks/<taskId>.json`. Each aggregate
+contains its instruction, owning session, schedule, next trigger, status,
+revision, and every execution result. Task files contain only the final assistant
+reply or error summary; complete user, assistant, and tool messages remain in the
+owning SessionStore.
+
+The Web task panel supports two explicit schedule types:
+
+- `once`: one timezone-aware future `runAt` value;
+- `interval`: a timezone-aware `startAt` plus a positive `intervalSeconds`.
+
+At each due time the Scheduler atomically claims the task, marks it running, and
+passes its instruction to `AgentService.run_turn(sessionId, content)`. Successful
+turns therefore reuse normal context, memory, tools, compaction, and atomic
+session persistence. Agent error events and unexpected Scheduler errors are
+stored in execution history rather than swallowed.
+
+Periodic tasks do not overlap themselves. After an execution finishes, the next
+trigger is the first schedule boundary strictly after completion. A failed
+periodic execution remains visible as failed but retains a future trigger. On
+restart, overdue schedules run once instead of replaying every missed interval;
+an execution interrupted by the previous process is closed as failed. Cancelling
+a running task prevents future triggers but lets the current agent turn finish
+and records its outcome.
 
 ## Session commands
 

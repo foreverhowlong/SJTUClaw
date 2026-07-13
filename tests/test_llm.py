@@ -177,7 +177,7 @@ def test_stream_chat_rejects_finish_reason_protocol_mismatches() -> None:
 
 def test_stream_chat_projects_internal_tool_metadata_at_provider_boundary() -> None:
     messages = [
-        {"role": "user", "content": "inspect"},
+        {"role": "user", "content": "inspect", "source": "scheduled_task"},
         {
             "role": "assistant",
             "content": None,
@@ -200,5 +200,7 @@ def test_stream_chat_projects_internal_tool_metadata_at_provider_boundary() -> N
 
     asyncio.run(collect_stream(client, messages))
 
+    assert "source" not in fake.completions.calls[0]["messages"][0]
+    assert messages[0]["source"] == "scheduled_task"
     assert "name" not in fake.completions.calls[0]["messages"][-1]
     assert messages[-1]["name"] == "read_file"

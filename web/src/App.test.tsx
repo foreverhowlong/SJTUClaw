@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -13,6 +13,13 @@ const mocks = vi.hoisted(() => ({
   createSession: vi.fn(),
   getSession: vi.fn(),
   deleteSession: vi.fn(),
+  gatewayHandler: null as
+    | ((message: {
+        type: "session_updated";
+        sessionId: string;
+        reason: "scheduled_task";
+      }) => void)
+    | null,
 }));
 
 vi.mock("./api", () => ({
@@ -23,10 +30,22 @@ vi.mock("./api", () => ({
   renameSession: vi.fn(),
   listAttachments: vi.fn().mockResolvedValue([]),
   uploadAttachment: vi.fn(),
+  listScheduledTasks: vi.fn().mockResolvedValue([]),
+  createScheduledTask: vi.fn(),
+  cancelScheduledTask: vi.fn(),
 }));
 
 vi.mock("./useGatewaySocket", () => ({
-  useGatewaySocket: () => ({ connection: "connected", sendTurn: vi.fn() }),
+  useGatewaySocket: (
+    handler: (message: {
+      type: "session_updated";
+      sessionId: string;
+      reason: "scheduled_task";
+    }) => void,
+  ) => {
+    mocks.gatewayHandler = handler;
+    return { connection: "connected", sendTurn: vi.fn() };
+  },
 }));
 
 import App from "./App";
@@ -85,5 +104,43 @@ describe("App session deletion", () => {
       expect(screen.getByRole("heading", { name: "Replacement" })).toBeTruthy(),
     );
     expect(mocks.createSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads a session when a scheduled task update is broadcast", async () => {
+    const session = makeSession("session_0123456789ab", "Scheduled session");
+    mocks.sessions = [session];
+    mocks.details = { [session.sessionId]: session };
+    mocks.listSessions.mockImplementation(async () => [...mocks.sessions]);
+    mocks.getSession.mockImplementation(
+      async (sessionId: string) => mocks.details[sessionId],
+    );
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Scheduled session" });
+
+    mocks.details[session.sessionId] = {
+      ...session,
+      revision: 1,
+      messageCount: 2,
+      timeline: [
+        {
+          type: "user_message",
+          content: "生成日报",
+          source: "scheduled_task",
+        },
+        { type: "assistant_message", content: "日报已生成。" },
+      ],
+    };
+    await act(async () => {
+      mocks.gatewayHandler?.({
+        type: "session_updated",
+        sessionId: session.sessionId,
+        reason: "scheduled_task",
+      });
+    });
+
+    expect(await screen.findByText("SCHEDULED TASK")).toBeTruthy();
+    expect(screen.getByText("日报已生成。")).toBeTruthy();
+    expect(mocks.getSession).toHaveBeenCalledTimes(2);
   });
 });
