@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import BytesIO
 
 from starlette.testclient import TestClient
 
@@ -55,6 +56,53 @@ def test_rest_sessions_share_the_runtime_store(tmp_path) -> None:
     assert created.status_code == 201
     assert created.json()["title"] == "Web session"
     assert detail.json()["messages"] == []
+
+
+def test_rest_renames_and_deletes_session_with_attachments(tmp_path) -> None:
+    runtime = make_runtime(tmp_path)
+    session = runtime.session_store.create("Before")
+    saved = runtime.attachment_store.save(
+        session.session_id,
+        "brief.txt",
+        "text/plain",
+        BytesIO(b"brief"),
+    )
+    attachment_path = (
+        runtime.session_store.root
+        / session.session_id
+        / "attachments"
+        / saved.attachment_id
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        renamed = client.patch(
+            f"/api/sessions/{session.session_id}",
+            json={"title": "After"},
+        )
+        deleted = client.delete(f"/api/sessions/{session.session_id}")
+        missing = client.get(f"/api/sessions/{session.session_id}")
+
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "After"
+    assert deleted.status_code == 204
+    assert missing.status_code == 404
+    assert not attachment_path.exists()
+
+
+def test_rest_session_mutations_validate_title_and_unknown_id(tmp_path) -> None:
+    runtime = make_runtime(tmp_path)
+    session = runtime.session_store.create()
+
+    with TestClient(create_app(runtime)) as client:
+        empty = client.patch(
+            f"/api/sessions/{session.session_id}",
+            json={"title": "   "},
+        )
+        unknown = client.delete("/api/sessions/session_0123456789ab")
+
+    assert empty.status_code == 400
+    assert "title" in empty.json()["error"]["message"]
+    assert unknown.status_code == 404
 
 
 def test_websocket_creates_missing_session_and_forwards_agent_events(tmp_path) -> None:

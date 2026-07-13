@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
@@ -30,6 +30,12 @@ class CreateSessionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str = "新会话"
+
+
+class RenameSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
 
 
 def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
@@ -60,7 +66,9 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
 
     @app.exception_handler(SessionError)
     async def handle_session_error(_request: Request, exc: SessionError):
-        return _error_response(404, "session_error", str(exc))
+        message = str(exc)
+        status = 404 if "不存在" in message or "无效的 sessionId" in message else 400
+        return _error_response(status, "session_error", message)
 
     @app.exception_handler(AttachmentError)
     async def handle_attachment_error(_request: Request, exc: AttachmentError):
@@ -92,6 +100,22 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
     async def get_session(session_id: str, request: Request) -> dict[str, Any]:
         session = _runtime(request).session_store.load(session_id)
         return _session_detail(session)
+
+    @app.patch("/api/sessions/{session_id}")
+    async def rename_session(
+        session_id: str,
+        payload: RenameSessionRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        async with _session_lock(request.app, session_id):
+            session = _runtime(request).session_store.rename(session_id, payload.title)
+        return _session_detail(session)
+
+    @app.delete("/api/sessions/{session_id}", status_code=204)
+    async def delete_session(session_id: str, request: Request) -> Response:
+        async with _session_lock(request.app, session_id):
+            _runtime(request).session_store.delete(session_id)
+        return Response(status_code=204)
 
     @app.get("/api/sessions/{session_id}/attachments")
     async def list_attachments(
@@ -148,9 +172,7 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
                         "session": _session_detail(session),
                     }
                 )
-                locks: dict[str, asyncio.Lock] = websocket.app.state.session_locks
-                lock = locks.setdefault(session_id, asyncio.Lock())
-                async with lock:
+                async with _session_lock(websocket.app, session_id):
                     async for event in active_runtime.agent.run_turn(
                         session_id,
                         message,
@@ -189,6 +211,11 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
 
 def _runtime(request: Request) -> ClawRuntime:
     return request.app.state.runtime
+
+
+def _session_lock(app: Any, session_id: str) -> asyncio.Lock:
+    locks: dict[str, asyncio.Lock] = app.state.session_locks
+    return locks.setdefault(session_id, asyncio.Lock())
 
 
 def _session_summary(item: SessionSummary) -> dict[str, Any]:

@@ -3,6 +3,7 @@ import type { AgentEvent, SessionRunState } from "./types";
 export const EMPTY_RUN: SessionRunState = {
   requestId: null,
   pendingUser: null,
+  intermediateAssistant: [],
   streamedAssistant: "",
   running: false,
   events: [],
@@ -17,6 +18,7 @@ export function startRun(
     ...(previous ?? EMPTY_RUN),
     requestId,
     pendingUser: message,
+    intermediateAssistant: [],
     streamedAssistant: "",
     running: true,
   };
@@ -49,8 +51,12 @@ export function applyAgentEvent(
     };
   }
   if (event.type === "tool_call") {
+    const completed = state.streamedAssistant.trim();
     return {
       ...state,
+      intermediateAssistant: completed
+        ? [...state.intermediateAssistant, state.streamedAssistant]
+        : state.intermediateAssistant,
       streamedAssistant: "",
       events: [...state.events, event],
     };
@@ -69,6 +75,7 @@ export function settleRun(
     ...(previous ?? EMPTY_RUN),
     requestId: null,
     pendingUser: null,
+    intermediateAssistant: [],
     streamedAssistant: "",
     running: false,
   };

@@ -20,6 +20,10 @@ from claw.store.attachments import AttachmentStore
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
 from claw.tools import ToolCall, ToolRegistry, ToolResult, build_read_only_registry
+from claw.tools.attachment import (
+    READ_ATTACHMENT_TOOL_NAME,
+    build_read_attachment_tool,
+)
 
 
 MAX_TOOL_CALLS_PER_BATCH = 5
@@ -70,7 +74,8 @@ class AgentService:
 
         yield AgentEvent("turn_start", session_id, {"userInput": user_input})
         try:
-            definitions = self._tools.definitions()
+            tools = self._tools_for_session(session_id)
+            definitions = tools.definitions()
             working: list[Message] = [{"role": "user", "content": user_input}]
             snapshot = self._store.load(session_id)
             if self._compactor is not None:
@@ -112,6 +117,7 @@ class AgentService:
                 snapshot,
                 working,
                 definitions,
+                tools,
             ):
                 yield event
             yield AgentEvent("turn_end", session_id, {"status": "completed"})
@@ -155,12 +161,22 @@ class AgentService:
         messages = self._build_context(session_id, snapshot, working)
         return serialized_request_chars(messages, definitions)
 
+    def _tools_for_session(self, session_id: str) -> ToolRegistry:
+        tools = self._tools.clone()
+        if self._attachment_store is None:
+            return tools
+        if tools.get(READ_ATTACHMENT_TOOL_NAME) is not None:
+            raise ToolError(f"tool 已注册: {READ_ATTACHMENT_TOOL_NAME}。")
+        tools.register(build_read_attachment_tool(self._attachment_store, session_id))
+        return tools
+
     async def _run_loop(
         self,
         session_id: str,
         snapshot: Session,
         working: list[Message],
         definitions: list[dict],
+        tools: ToolRegistry,
     ) -> AsyncIterator[AgentEvent]:
         while True:
             messages = self._build_context(session_id, snapshot, working)
@@ -185,6 +201,7 @@ class AgentService:
                     session_id,
                     working,
                     completion.tool_calls,
+                    tools,
                 ):
                     yield event
                 continue
@@ -206,6 +223,7 @@ class AgentService:
         session_id: str,
         working: list[Message],
         calls: tuple[ToolCall, ...],
+        tools: ToolRegistry,
     ) -> AsyncIterator[AgentEvent]:
         oversized = len(calls) > MAX_TOOL_CALLS_PER_BATCH
         for call in calls:
@@ -213,6 +231,7 @@ class AgentService:
                 session_id,
                 working,
                 call,
+                tools,
                 oversized=oversized,
             ):
                 yield event
@@ -222,6 +241,7 @@ class AgentService:
         session_id: str,
         working: list[Message],
         call: ToolCall,
+        tools: ToolRegistry,
         *,
         oversized: bool,
     ) -> AsyncIterator[AgentEvent]:
@@ -244,9 +264,9 @@ class AgentService:
             )
             return
 
-        tool = self._tools.get(call.name)
+        tool = tools.get(call.name)
         if tool is None or not tool.requires_approval:
-            result = await self._tools.execute(call)
+            result = await tools.execute(call)
         else:
             yield AgentEvent(
                 "approval_required",
@@ -265,7 +285,7 @@ class AgentService:
                 },
             )
             if decision.approved:
-                result = await self._tools.execute(call, approved=True)
+                result = await tools.execute(call, approved=True)
             else:
                 result = ToolResult(
                     call.call_id,

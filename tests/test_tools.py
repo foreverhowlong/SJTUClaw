@@ -43,6 +43,18 @@ def test_registry_exports_sorted_read_only_definitions_and_rejects_duplicates() 
         registry.register(definition("a_tool"))
 
 
+def test_registry_clone_can_be_extended_without_mutating_source() -> None:
+    registry = ToolRegistry()
+    original = definition("original")
+    registry.register(original)
+
+    copied = registry.clone()
+    copied.register(definition("scoped"))
+
+    assert registry.get("scoped") is None
+    assert copied.get("original") is original
+
+
 @pytest.mark.parametrize(
     "call,error",
     [

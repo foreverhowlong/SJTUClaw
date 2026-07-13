@@ -34,12 +34,25 @@ describe("session run state", () => {
     expect(state.events.at(-1)?.type).toBe("turn_end");
   });
 
-  it("clears intermediate streamed text when the model requests a tool", () => {
+  it("preserves intermediate streamed text when the model requests a tool", () => {
     let state = startRun(undefined, "request_1", "inspect");
     state = applyAgentEvent(state, event("llm_delta", { delta: "checking" }));
     state = applyAgentEvent(state, event("tool_call", { name: "read_file" }));
 
     expect(state.streamedAssistant).toBe("");
+    expect(state.intermediateAssistant).toEqual(["checking"]);
     expect(state.events.at(-1)?.type).toBe("tool_call");
+  });
+
+  it("keeps multiple working notes in tool-call order", () => {
+    let state = startRun(undefined, "request_1", "inspect");
+    state = applyAgentEvent(state, event("llm_delta", { delta: "first" }));
+    state = applyAgentEvent(state, event("tool_call", { name: "read_file" }));
+    state = applyAgentEvent(state, event("llm_delta", { delta: "second" }));
+    state = applyAgentEvent(state, event("tool_call", { name: "list_dir" }));
+    state = applyAgentEvent(state, event("llm_delta", { delta: "final" }));
+
+    expect(state.intermediateAssistant).toEqual(["first", "second"]);
+    expect(state.streamedAssistant).toBe("final");
   });
 });

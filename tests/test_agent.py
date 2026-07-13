@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+from io import BytesIO
 
 import pytest
 
@@ -10,6 +11,7 @@ from claw.compaction import CompactionResult
 from claw.context import ContextBuilder
 from claw.errors import LLMError, SessionError, ToolError
 from claw.llm import LLMCompletion, LLMStreamEvent, Message
+from claw.store.attachments import AttachmentStore
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
 from claw.tools import ToolCall, ToolDefinition, ToolRegistry
@@ -135,6 +137,77 @@ def test_agent_executes_tool_and_persists_complete_protocol_turn(tmp_path) -> No
         "assistant",
     ]
     assert persisted[-1]["content"] == "Based on real observation."
+
+
+def test_agent_reads_attachment_through_session_scoped_tool(tmp_path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    memories = MemoryStore(tmp_path / "memory")
+    attachments = AttachmentStore(store)
+    session = store.create()
+    saved = attachments.save(
+        session.session_id,
+        "brief.md",
+        "text/markdown",
+        BytesIO(b"# Real brief"),
+    )
+    call = ToolCall(
+        "attachment_call",
+        "read_attachment",
+        json.dumps({"attachment_id": saved.attachment_id}),
+    )
+    llm = FakeLLM([calls(call), final("The uploaded brief is real.")])
+    agent = AgentService(
+        llm,
+        store,
+        ContextBuilder("rules", "style"),
+        memories,
+        tool_registry=ToolRegistry(),
+        attachment_store=attachments,
+    )
+
+    events = asyncio.run(collect(agent, session.session_id, "read the upload"))
+
+    definition_names = [item["function"]["name"] for item in llm.calls[0][1]]
+    assert definition_names == ["read_attachment"]
+    result = next(event for event in events if event.type == "tool_result")
+    assert result.payload["ok"] is True
+    assert result.payload["result"]["content"] == "# Real brief"
+    assert "# Real brief" in llm.calls[1][0][-1]["content"]
+    assert store.load(session.session_id).messages[2]["name"] == "read_attachment"
+
+
+def test_attachment_tool_cannot_read_another_session(tmp_path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    memories = MemoryStore(tmp_path / "memory")
+    attachments = AttachmentStore(store)
+    first = store.create()
+    second = store.create()
+    foreign = attachments.save(
+        second.session_id,
+        "secret.txt",
+        "text/plain",
+        BytesIO(b"secret"),
+    )
+    call = ToolCall(
+        "foreign_call",
+        "read_attachment",
+        json.dumps({"attachment_id": foreign.attachment_id}),
+    )
+    llm = FakeLLM([calls(call), final("I cannot read it.")])
+    agent = AgentService(
+        llm,
+        store,
+        ContextBuilder("rules", "style"),
+        memories,
+        tool_registry=ToolRegistry(),
+        attachment_store=attachments,
+    )
+
+    events = asyncio.run(collect(agent, first.session_id, "read foreign"))
+
+    result = next(event for event in events if event.type == "tool_result")
+    assert result.payload["ok"] is False
+    assert "当前 session 不存在附件" in result.payload["error"]
 
 
 def test_tool_validation_failure_is_observation_not_turn_failure(tmp_path) -> None:
@@ -486,7 +559,7 @@ def test_known_runtime_errors_use_stable_public_codes(
     else:
         monkeypatch.setattr(
             agent._tools,
-            "definitions",
+            "clone",
             lambda: (_ for _ in ()).throw(failure),
         )
 

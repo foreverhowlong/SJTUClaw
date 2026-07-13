@@ -58,6 +58,7 @@ export type GatewayMessage =
 export interface SessionRunState {
   requestId: string | null;
   pendingUser: string | null;
+  intermediateAssistant: string[];
   streamedAssistant: string;
   running: boolean;
   events: AgentEvent[];

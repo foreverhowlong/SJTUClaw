@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   createSession,
+  deleteSession as deleteSessionRequest,
   getSession,
   listAttachments,
   listSessions,
+  renameSession as renameSessionRequest,
   uploadAttachment,
 } from "./api";
 import { ConversationPane } from "./components/ConversationPane";
@@ -157,6 +159,52 @@ export default function App() {
     }
   }, [refreshSessions]);
 
+  const handleRenameSession = useCallback(
+    async (sessionId: string, title: string) => {
+      try {
+        const renamed = await renameSessionRequest(sessionId, title);
+        setDetails((previous) => ({ ...previous, [sessionId]: renamed }));
+        await refreshSessions();
+      } catch (reason) {
+        setError(errorMessage(reason));
+        throw reason;
+      }
+    },
+    [refreshSessions],
+  );
+
+  const handleDeleteSession = useCallback(
+    async (sessionId: string) => {
+      try {
+        await deleteSessionRequest(sessionId);
+        setDetails((previous) => omitKey(previous, sessionId));
+        setAttachments((previous) => omitKey(previous, sessionId));
+        setRuns((previous) => omitKey(previous, sessionId));
+        const remaining = await refreshSessions();
+        if (activeSessionId !== sessionId) return;
+
+        if (remaining.length > 0) {
+          setActiveSessionId(remaining[0].sessionId);
+          await loadSession(remaining[0].sessionId);
+          return;
+        }
+
+        const created = await createSession();
+        setActiveSessionId(created.sessionId);
+        setDetails((previous) => ({ ...previous, [created.sessionId]: created }));
+        setAttachments((previous) => ({
+          ...previous,
+          [created.sessionId]: [],
+        }));
+        await refreshSessions();
+      } catch (reason) {
+        setError(errorMessage(reason));
+        throw reason;
+      }
+    },
+    [activeSessionId, loadSession, refreshSessions],
+  );
+
   const handleSend = useCallback(
     (content: string) => {
       if (!activeSessionId) return;
@@ -212,6 +260,15 @@ export default function App() {
     () => connection.toUpperCase(),
     [connection],
   );
+  const runningSessionIds = useMemo(
+    () =>
+      new Set(
+        Object.entries(runs)
+          .filter(([, run]) => run.running)
+          .map(([sessionId]) => sessionId),
+      ),
+    [runs],
+  );
 
   return (
     <main className="page-shell">
@@ -240,9 +297,6 @@ export default function App() {
               <span aria-hidden="true" className="connection-dot" />
               {connectionLabel}
             </span>
-            <button className="primary-button" type="button" onClick={handleNewSession}>
-              <span aria-hidden="true">＋</span> NEW
-            </button>
             <button
               className="mobile-toggle"
               type="button"
@@ -271,6 +325,9 @@ export default function App() {
             loading={loading}
             onSelect={selectSession}
             onNew={handleNewSession}
+            onRename={handleRenameSession}
+            onDelete={handleDeleteSession}
+            runningSessionIds={runningSessionIds}
             onClose={() => setLeftOpen(false)}
           />
           <ConversationPane
@@ -308,4 +365,10 @@ export default function App() {
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : "发生未知错误。";
+}
+
+function omitKey<T>(source: Record<string, T>, key: string): Record<string, T> {
+  const next = { ...source };
+  delete next[key];
+  return next;
 }

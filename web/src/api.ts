@@ -31,6 +31,27 @@ export function getSession(sessionId: string): Promise<SessionDetail> {
   return request<SessionDetail>(`/api/sessions/${sessionId}`);
 }
 
+export function renameSession(
+  sessionId: string,
+  title: string,
+): Promise<SessionDetail> {
+  return request<SessionDetail>(`/api/sessions/${sessionId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  const response = await fetch(`/api/sessions/${sessionId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.error?.message ?? `请求失败 (${response.status})`);
+  }
+}
+
 export async function listAttachments(
   sessionId: string,
 ): Promise<AttachmentMetadata[]> {

@@ -249,7 +249,7 @@ summary:focus-visible {
   border-right: 1px solid var(--ash);
   background: var(--parchment);
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto;
 }
 
 .panel-heading {
@@ -282,16 +282,35 @@ summary:focus-visible {
   gap: 6px;
 }
 
+.new-session-button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 0 14px;
+  padding: 13px 15px;
+  border: 0;
+  border-radius: 28px;
+  background: var(--lime);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.new-session-button:hover {
+  filter: brightness(0.96);
+}
+
 .session-item {
   position: relative;
   width: 100%;
-  padding: 13px 12px 12px 15px;
-  overflow: hidden;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   border: 1px solid transparent;
   border-radius: var(--radius-inner);
   background: transparent;
-  text-align: left;
-  cursor: pointer;
 }
 
 .session-item:hover {
@@ -302,6 +321,16 @@ summary:focus-visible {
 .session-item.is-active {
   border-color: var(--ash);
   background: var(--white);
+}
+
+.session-select {
+  min-width: 0;
+  padding: 13px 38px 12px 15px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
 }
 
 .session-accent {
@@ -329,6 +358,112 @@ summary:focus-visible {
 .session-title {
   font-size: 14px;
   font-weight: 500;
+}
+
+.session-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 5;
+}
+
+.session-menu-button {
+  width: 28px;
+  height: 28px;
+  padding: 0 0 5px;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--graphite);
+  font-size: 12px;
+  letter-spacing: 1px;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.session-item:hover .session-menu-button,
+.session-menu-button:focus-visible,
+.session-menu-button[aria-expanded="true"] {
+  border-color: var(--ash);
+  background: var(--white);
+  opacity: 1;
+}
+
+.session-menu-button:disabled {
+  cursor: not-allowed;
+  opacity: 0;
+}
+
+.session-menu {
+  position: absolute;
+  top: 32px;
+  right: 0;
+  width: 104px;
+  padding: 6px;
+  border: 1px solid var(--ash);
+  border-radius: 12px;
+  background: var(--white);
+}
+
+.session-menu button {
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.session-menu button:hover {
+  background: var(--parchment);
+}
+
+.session-running {
+  position: absolute;
+  right: 12px;
+  bottom: 11px;
+  color: var(--graphite);
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+
+.session-rename-form {
+  padding: 10px;
+  border: 1px solid var(--ash);
+  border-radius: var(--radius-inner);
+  background: var(--white);
+}
+
+.session-rename-form input {
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid var(--ash);
+  border-radius: var(--radius-input);
+  background: var(--white);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.session-rename-form div {
+  display: flex;
+  gap: 12px;
+  margin-top: 9px;
+}
+
+.session-rename-form button {
+  padding: 0 0 2px;
+  border: 0;
+  border-bottom: 1px solid var(--ink);
+  background: transparent;
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  cursor: pointer;
 }
 
 .session-meta {
@@ -457,6 +592,104 @@ summary:focus-visible {
   overflow-wrap: anywhere;
   font-size: 15px;
   line-height: 1.6;
+}
+
+.message-agent .message-content p,
+.message-agent .message-content ul,
+.message-agent .message-content ol,
+.message-agent .message-content blockquote,
+.message-agent .message-content pre,
+.message-agent .message-content table,
+.message-agent .message-content h1,
+.message-agent .message-content h2,
+.message-agent .message-content h3,
+.message-agent .message-content h4 {
+  margin: 0 0 12px;
+}
+
+.message-agent .message-content > :last-child {
+  margin-bottom: 0;
+}
+
+.message-agent .message-content h1,
+.message-agent .message-content h2,
+.message-agent .message-content h3,
+.message-agent .message-content h4 {
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.message-agent .message-content h1 { font-size: 24px; }
+.message-agent .message-content h2 { font-size: 20px; }
+.message-agent .message-content h3,
+.message-agent .message-content h4 { font-size: 16px; }
+
+.message-agent .message-content ul,
+.message-agent .message-content ol {
+  padding-left: 22px;
+}
+
+.message-agent .message-content li + li {
+  margin-top: 5px;
+}
+
+.message-agent .message-content blockquote {
+  padding: 7px 0 7px 13px;
+  border-left: 2px solid var(--ash);
+  color: var(--graphite);
+}
+
+.message-agent .message-content a {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px solid var(--ink);
+}
+
+.message-agent .message-content code {
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: var(--parchment);
+  font: 0.9em/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.message-agent .message-content pre {
+  padding: 13px 14px;
+  overflow-x: auto;
+  border-radius: 10px;
+  background: var(--charcoal);
+  color: var(--parchment);
+}
+
+.message-agent .message-content pre code {
+  padding: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.message-agent .message-content table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.message-agent .message-content th,
+.message-agent .message-content td {
+  padding: 8px 10px;
+  border: 1px solid var(--ash);
+  text-align: left;
+}
+
+.message-agent .message-content th {
+  background: var(--parchment);
+  font-weight: 500;
+}
+
+.message-agent .message-content input[type="checkbox"] {
+  margin-right: 7px;
+  accent-color: var(--lime);
 }
 
 .message-user .message-content {
@@ -823,6 +1056,69 @@ summary:focus-visible {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(20 20 15 / 48%);
+}
+
+.confirm-dialog {
+  width: min(420px, 100%);
+  padding: 28px;
+  border-radius: var(--radius-card);
+  background: var(--white);
+}
+
+.confirm-dialog .micro-label {
+  color: var(--graphite);
+}
+
+.confirm-dialog h2 {
+  margin: 8px 0 12px;
+  font-size: 28px;
+  line-height: 1.14;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+}
+
+.confirm-dialog p {
+  margin: 0;
+  color: var(--graphite);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.dialog-actions button {
+  padding: 11px 15px;
+  border-radius: 28px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.dialog-cancel {
+  border: 1px solid var(--ash);
+  background: transparent;
+}
+
+.dialog-delete {
+  border: 1px solid var(--charcoal);
+  background: var(--charcoal);
+  color: var(--parchment);
 }
 
 .drawer-backdrop {

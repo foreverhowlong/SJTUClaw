@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import type {
   ConnectionState,
@@ -62,7 +64,13 @@ export function ConversationPane({
           </div>
         )}
         {messages.map((message, index) => (
-          <MessageBubble key={`${message.role}-${index}`} message={message} />
+          <MessageBubble
+            key={`${message.role}-${index}`}
+            message={message}
+            workingNote={
+              message.role === "assistant" && Boolean(message.tool_calls?.length)
+            }
+          />
         ))}
         {run.pendingUser && (
           <MessageBubble
@@ -70,6 +78,13 @@ export function ConversationPane({
             pending
           />
         )}
+        {run.intermediateAssistant.map((content, index) => (
+          <MessageBubble
+            key={`working-note-${index}`}
+            message={{ role: "assistant", content }}
+            workingNote
+          />
+        ))}
         {run.streamedAssistant && (
           <MessageBubble
             message={{ role: "assistant", content: run.streamedAssistant }}
@@ -126,8 +141,7 @@ export function ConversationPane({
 function visibleMessages(messages: ConversationMessage[]) {
   return messages.filter(
     (message) =>
-      (message.role === "user" ||
-        (message.role === "assistant" && !message.tool_calls)) &&
+      (message.role === "user" || message.role === "assistant") &&
       typeof message.content === "string" &&
       message.content.trim(),
   );
@@ -137,20 +151,40 @@ function MessageBubble({
   message,
   pending = false,
   streaming = false,
+  workingNote = false,
 }: {
   message: ConversationMessage;
   pending?: boolean;
   streaming?: boolean;
+  workingNote?: boolean;
 }) {
   const user = message.role === "user";
   return (
     <article className={`message-row ${user ? "message-user" : "message-agent"}`}>
       <div className="message-label">
-        <span className="micro-label">{user ? "YOU" : "CLAW"}</span>
+        <span className="micro-label">
+          {user ? "YOU" : workingNote ? "CLAW / WORKING NOTE" : "CLAW"}
+        </span>
         {pending && <span className="pending-label">PENDING</span>}
       </div>
       <div className="message-content">
-        {message.content}
+        {user ? (
+          message.content
+        ) : (
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            skipHtml
+            components={{
+              a: ({ children, ...props }) => (
+                <a {...props} target="_blank" rel="noreferrer noopener">
+                  {children}
+                </a>
+              ),
+            }}
+          >
+            {message.content ?? ""}
+          </ReactMarkdown>
+        )}
         {streaming && <span className="stream-caret" aria-hidden="true" />}
       </div>
     </article>

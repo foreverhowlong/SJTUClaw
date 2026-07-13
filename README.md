@@ -76,12 +76,17 @@ cd web && npm run dev
 Vite proxies `/api` and `/ws` to the local Gateway. The interface is a
 three-column agent command center: shared sessions on the left, persisted chat
 history in the middle, and structured runtime activity plus session attachments
-on the right. On smaller screens the side panels become drawers.
+on the right. Sessions can be renamed or deleted from the left rail, assistant
+messages render safe GitHub-flavored Markdown, and text emitted before a tool
+call remains visible as a working note. On smaller screens the side panels
+become drawers.
 
 The REST surface is intentionally small:
 
 - `GET /api/sessions` lists sessions created by either CLI or Web.
 - `POST /api/sessions` creates a session.
+- `PATCH /api/sessions/{sessionId}` renames a session.
+- `DELETE /api/sessions/{sessionId}` deletes a session and its attachments.
 - `GET /api/sessions/{sessionId}` returns persisted history.
 - `GET/POST /api/sessions/{sessionId}/attachments` lists or uploads attachments.
 
@@ -104,8 +109,11 @@ list metadata for the requested session.
 
 Attachment metadata is included in that session's model context. Uploading a
 file does not make it a workspace file, grant permission to modify it, or add a
-new shell/write capability. Step 6 intentionally does not parse attachment
-contents.
+new shell/write capability. When an attachment store is configured, the runtime
+adds a session-scoped `read_attachment` tool for UTF-8 text. The tool accepts an
+attachment ID, never exposes the server path, and returns at most 65,536
+characters. Attachments from another session, missing blobs, symbolic links,
+invalid UTF-8, and obvious binary content become ordinary tool failures.
 
 ## Session commands
 
@@ -187,7 +195,7 @@ calls in one batch, appends successful and failed results to the in-progress
 session context, and calls the model again until it produces a final answer.
 There is no total agent-loop iteration limit.
 
-Step 5 provides exactly three read-only tools:
+Step 5 provides three workspace-oriented read-only tools:
 
 - `current_time {}` returns local time with its UTC offset.
 - `list_dir {"path":"."}` lists one directory level in stable name order.
@@ -196,6 +204,13 @@ Step 5 provides exactly three read-only tools:
 
 Relative tool paths are resolved from the process working directory. Step 5 does
 not reinterpret them relative to the runtime data directory.
+
+Gateway turns also receive a session-scoped attachment reader when the
+`AttachmentStore` is available:
+
+- `read_attachment {"attachment_id":"attachment_0123456789ab"}` reads UTF-8
+  text belonging to the current session only and caps returned content at
+  65,536 characters.
 
 Unknown tools, invalid JSON arguments, schema violations, missing files, invalid
 UTF-8, and handler failures become structured tool observations rather than

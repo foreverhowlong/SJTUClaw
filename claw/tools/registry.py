@@ -97,6 +97,13 @@ class ToolRegistry:
     def get(self, name: str) -> ToolDefinition | None:
         return self._tools.get(name)
 
+    def clone(self) -> ToolRegistry:
+        """Copy definitions and handlers for safe per-turn extension."""
+        copied = ToolRegistry(timeout_seconds=self._timeout_seconds)
+        for tool in self._tools.values():
+            copied.register(tool)
+        return copied
+
     async def execute(self, call: ToolCall, *, approved: bool = False) -> ToolResult:
         tool = self._tools.get(call.name)
         if tool is None:
