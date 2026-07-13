@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from importlib import resources
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
+from claw.context import project_messages
 from claw.errors import ConfigError, LLMError, SessionError
 from claw.llm import Message
 from claw.store.sessions import SessionStore
@@ -15,24 +17,24 @@ DEFAULT_COMPACTION_PROMPT_RESOURCE = "prompts/compaction.md"
 
 
 class ChatClient(Protocol):
-    def chat(self, messages: list[Message]) -> str: ...
+    async def chat(self, messages: list[Message]) -> str: ...
 
 
 @dataclass(frozen=True)
 class CompactionPolicy:
-    """Use active message count as a transparent approximation for token usage."""
+    """Use deterministic serialized request characters as the context budget."""
 
-    max_messages: int = 32
-    recent_messages: int = 8
+    max_context_chars: int = 80_000
+    recent_context_chars: int = 20_000
 
     def __post_init__(self) -> None:
-        if self.recent_messages < 2 or self.recent_messages % 2 != 0:
-            raise ValueError("recent_messages 必须是至少为 2 的偶数。")
-        if self.max_messages <= self.recent_messages:
-            raise ValueError("max_messages 必须大于 recent_messages。")
+        if self.recent_context_chars <= 0:
+            raise ValueError("recent_context_chars 必须大于 0。")
+        if self.max_context_chars <= self.recent_context_chars:
+            raise ValueError("max_context_chars 必须大于 recent_context_chars。")
 
 
-CompactionStatus = Literal["compacted", "skipped", "failed"]
+CompactionStatus = Literal["compacted", "skipped", "failed", "unavailable"]
 
 
 @dataclass(frozen=True)
@@ -67,33 +69,72 @@ class Compactor:
         self._prompt = normalized_prompt
         self._policy = policy or CompactionPolicy()
 
-    def compact(self, session_id: str, *, force: bool = False) -> CompactionResult:
+    def should_compact(self, request_chars: int) -> bool:
+        return request_chars > self._policy.max_context_chars
+
+    async def compact(
+        self,
+        session_id: str,
+        *,
+        force: bool = False,
+        request_chars: int | None = None,
+    ) -> CompactionResult:
         snapshot = self._store.load(session_id)
-        if not force and snapshot.message_count <= self._policy.max_messages:
+        measured_chars = (
+            serialized_request_chars(snapshot.messages)
+            if request_chars is None
+            else request_chars
+        )
+        if not force and measured_chars <= self._policy.max_context_chars:
             return CompactionResult(
                 session_id=session_id,
                 status="skipped",
                 old_message_count=0,
                 recent_message_count=snapshot.message_count,
-                detail="active messages 尚未超过自动压缩阈值。",
+                detail=(
+                    f"request characters={measured_chars}，"
+                    f"尚未超过阈值 {self._policy.max_context_chars}。"
+                ),
             )
-        if snapshot.message_count <= self._policy.recent_messages:
+        turns = _split_turns(snapshot.messages)
+        if len(turns) <= 1:
             return CompactionResult(
                 session_id=session_id,
                 status="skipped",
                 old_message_count=0,
                 recent_message_count=snapshot.message_count,
                 summary=snapshot.summary,
-                detail="没有足够的旧消息可压缩。",
+                detail="没有足够的完整旧 turns 可压缩。",
             )
 
-        messages = snapshot.messages
-        recent = messages[-self._policy.recent_messages :]
-        old = messages[: -self._policy.recent_messages]
+        recent_turns = [turns[-1]]
+        for turn in reversed(turns[:-1]):
+            candidate = [*turn, *(message for item in recent_turns for message in item)]
+            if (
+                serialized_request_chars(project_messages(candidate))
+                > self._policy.recent_context_chars
+            ):
+                break
+            recent_turns.insert(0, turn)
+        old_turns = turns[: len(turns) - len(recent_turns)]
+        if force and not old_turns:
+            recent_turns = [turns[-1]]
+            old_turns = turns[:-1]
+        if not old_turns:
+            return CompactionResult(
+                session_id=session_id,
+                status="skipped",
+                old_message_count=0,
+                recent_message_count=snapshot.message_count,
+                summary=snapshot.summary,
+                detail="所有完整 turns 都在 recent character budget 内。",
+            )
+        old = [message for turn in old_turns for message in turn]
+        recent = [message for turn in recent_turns for message in turn]
         try:
-            summary = self._llm.chat(
+            summary = (await self._llm.chat(
                 self._build_messages(snapshot.summary, old)
-            ).strip()
+            )).strip()
         except LLMError as exc:
             return CompactionResult(
                 session_id=session_id,
@@ -144,8 +185,8 @@ class Compactor:
         old_messages: list[Message],
     ) -> list[Message]:
         rendered_messages = "\n\n".join(
-            f"{message['role'].upper()}:\n{message['content']}"
-            for message in old_messages
+            json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+            for message in project_messages(old_messages)
         )
         return [
             {"role": "system", "content": self._prompt},
@@ -159,6 +200,28 @@ class Compactor:
                 ),
             },
         ]
+
+
+def serialized_request_chars(
+    messages: list[Message],
+    tools: list[dict[str, Any]] | None = None,
+) -> int:
+    """Count deterministic JSON characters in the model context payload."""
+    request: dict[str, Any] = {"messages": messages}
+    if tools:
+        request["tools"] = tools
+    return len(json.dumps(request, ensure_ascii=False, separators=(",", ":")))
+
+
+def _split_turns(messages: list[Message]) -> list[list[Message]]:
+    turns: list[list[Message]] = []
+    for message in messages:
+        if message.get("role") == "user":
+            turns.append([])
+        if not turns:
+            raise SessionError("session history 没有从 user turn 开始。")
+        turns[-1].append(message)
+    return turns
 
 
 def load_compaction_prompt() -> str:

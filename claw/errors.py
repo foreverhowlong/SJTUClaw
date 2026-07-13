@@ -13,6 +13,10 @@ class LLMError(ClawError):
     """Raised when the LLM provider request or response fails."""
 
 
+class ToolError(ClawError):
+    """Raised when a tool cannot be registered or executed safely."""
+
+
 class SessionError(ClawError):
     """Raised when session state cannot be loaded or persisted safely."""
 

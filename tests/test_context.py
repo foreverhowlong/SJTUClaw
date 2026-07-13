@@ -1,6 +1,8 @@
+import json
+
 import pytest
 
-from claw.context import ContextBuilder
+from claw.context import ContextBuilder, project_messages
 from claw.errors import ConfigError
 from claw.store.memory import MemoryRecord
 
@@ -88,3 +90,38 @@ def test_context_builder_reports_missing_or_blank_prompt_files(tmp_path) -> None
     system_path.write_text("  \n", encoding="utf-8")
     with pytest.raises(ConfigError, match="不能为空"):
         ContextBuilder.from_files(system_path, soul_path)
+
+
+def test_tool_result_projection_is_newest_first_and_keeps_protocol_stubs() -> None:
+    source = [
+        {
+            "role": "tool",
+            "tool_call_id": f"call_{index}",
+            "name": "read_file",
+            "content": str(index) * 20,
+        }
+        for index in range(3)
+    ]
+
+    projected = project_messages(
+        source,
+        per_result_chars=8,
+        total_result_chars=12,
+    )
+
+    oldest = json.loads(projected[0]["content"])
+    middle = json.loads(projected[1]["content"])
+    newest = json.loads(projected[2]["content"])
+    assert oldest["preview"] == ""
+    assert middle["preview"] == "1" * 4
+    assert newest["preview"] == "2" * 8
+    assert [message["tool_call_id"] for message in projected] == [
+        "call_0",
+        "call_1",
+        "call_2",
+    ]
+    assert [message["content"] for message in source] == [
+        "0" * 20,
+        "1" * 20,
+        "2" * 20,
+    ]

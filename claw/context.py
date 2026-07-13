@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from copy import deepcopy
 from importlib import resources
 from pathlib import Path
 
@@ -13,6 +15,8 @@ from claw.store.memory import MemoryRecord
 
 DEFAULT_SYSTEM_PROMPT_RESOURCE = "prompts/system_prompt.md"
 DEFAULT_SOUL_RESOURCE = "prompts/soul.md"
+TOOL_RESULT_PREVIEW_CHARS = 16_384
+TOTAL_TOOL_RESULT_PREVIEW_CHARS = 32_768
 
 
 class ContextBuilder:
@@ -63,8 +67,44 @@ class ContextBuilder:
             stable_sections.append(f"[Session Summary]\n{normalized_summary}")
         return [
             {"role": "system", "content": "\n\n".join(stable_sections)},
-            *(message.copy() for message in messages),
+            *project_messages(messages),
         ]
+
+
+def project_messages(
+    messages: Sequence[Message],
+    *,
+    per_result_chars: int = TOOL_RESULT_PREVIEW_CHARS,
+    total_result_chars: int = TOTAL_TOOL_RESULT_PREVIEW_CHARS,
+) -> list[Message]:
+    """Return an LLM-safe copy while preserving every tool protocol message.
+
+    SessionStore remains the full-fidelity source of truth. Only this context
+    projection is truncated, allocating raw preview characters newest-first.
+    """
+    if per_result_chars < 0 or total_result_chars < 0:
+        raise ValueError("tool result preview budgets 不能为负数。")
+    projected = [deepcopy(message) for message in messages]
+    remaining = total_result_chars
+    for message in reversed(projected):
+        if message.get("role") != "tool" or not isinstance(message.get("content"), str):
+            continue
+        content = message["content"]
+        allowance = min(per_result_chars, remaining)
+        if len(content) <= allowance:
+            remaining -= len(content)
+            continue
+        preview = content[:allowance]
+        message["content"] = json.dumps(
+            {
+                "runtimeTruncated": True,
+                "originalCharacters": len(content),
+                "preview": preview,
+            },
+            ensure_ascii=False,
+        )
+        remaining -= len(preview)
+    return projected
 
 
 def _load_context(

@@ -12,6 +12,28 @@ TURN = [
     {"role": "assistant", "content": "graph answer"},
 ]
 
+TOOL_TURN = [
+    {"role": "user", "content": "read it"},
+    {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": '{"path":"README.md"}'},
+            }
+        ],
+    },
+    {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "name": "read_file",
+        "content": '{"ok":true,"result":"hello"}',
+    },
+    {"role": "assistant", "content": "The file says hello."},
+]
+
 
 def test_store_commits_append_only_turns_and_persists_metadata(tmp_path) -> None:
     root = tmp_path / "sessions"
@@ -36,6 +58,35 @@ def test_store_commits_append_only_turns_and_persists_metadata(tmp_path) -> None
     assert record["type"] == "turn"
     assert record["revision"] == 1
     assert record["messages"] == TURN
+
+
+def test_store_round_trips_complete_tool_turn_and_copies_nested_values(tmp_path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create()
+
+    committed = store.commit_turn(
+        session.session_id,
+        expected_revision=0,
+        messages=TOOL_TURN,
+    )
+    loaded = store.load(session.session_id)
+    committed.messages[1]["tool_calls"][0]["function"]["name"] = "changed"
+
+    assert loaded.messages == TOOL_TURN
+    assert store.load(session.session_id).messages == TOOL_TURN
+
+
+def test_store_rejects_orphan_or_mismatched_tool_results(tmp_path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create()
+    orphan = [TOOL_TURN[0], TOOL_TURN[2], TOOL_TURN[-1]]
+    mismatched = [message.copy() for message in TOOL_TURN]
+    mismatched[2] = {**mismatched[2], "tool_call_id": "other"}
+
+    with pytest.raises(SessionError, match="中间消息"):
+        store.commit_turn(session.session_id, expected_revision=0, messages=orphan)
+    with pytest.raises(SessionError, match="一一对应"):
+        store.commit_turn(session.session_id, expected_revision=0, messages=mismatched)
 
 
 def test_store_reads_legacy_per_message_jsonl_and_appends_new_turn(tmp_path) -> None:

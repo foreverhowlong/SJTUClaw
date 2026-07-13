@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -26,13 +27,13 @@ class Session:
         object.__setattr__(
             self,
             "_messages",
-            tuple(message.copy() for message in self._messages),
+            tuple(deepcopy(message) for message in self._messages),
         )
 
     @property
     def messages(self) -> list[Message]:
         """Return a copy so callers cannot mutate session state accidentally."""
-        return [message.copy() for message in self._messages]
+        return [deepcopy(message) for message in self._messages]
 
     @property
     def message_count(self) -> int:

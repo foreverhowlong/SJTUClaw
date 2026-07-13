@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import json
 import sys
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Protocol, TextIO
 
 from prompt_toolkit import PromptSession
 
-from claw.agent import AgentService, TurnResult
+from claw.agent import AgentService
 from claw.cli_commands import (
     HELP_TEXT,
     ChatInput,
@@ -29,7 +32,9 @@ from claw.compaction import CompactionResult, Compactor, load_compaction_prompt
 from claw.config import load_llm_config
 from claw.context import ContextBuilder
 from claw.errors import ClawError, CommandParseError
+from claw.events import AgentEvent
 from claw.llm import LLMClient
+from claw.logging_config import configure_logging
 from claw.paths import RuntimePaths
 from claw.session import Session
 from claw.store.memory import MemoryStore
@@ -37,12 +42,13 @@ from claw.store.sessions import SessionStore
 
 
 _prompt_session: PromptSession[str] | None = None
+InputFunction = Callable[[str], str | Awaitable[str]]
 
 
 class AgentRuntime(Protocol):
-    def run_turn(self, session_id: str, user_input: str) -> TurnResult: ...
+    def run_turn(self, session_id: str, user_input: str) -> AsyncIterator[AgentEvent]: ...
 
-    def compact_session(
+    async def compact_session(
         self,
         session_id: str,
         *,
@@ -50,13 +56,13 @@ class AgentRuntime(Protocol):
     ) -> CompactionResult: ...
 
 
-def run_repl(
+async def run_repl(
     agent: AgentRuntime,
     session_store: SessionStore,
     memory_store: MemoryStore,
     *,
     initial_session_id: str | None = None,
-    input_fn: Callable[[str], str] | None = None,
+    input_fn: InputFunction | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
@@ -69,7 +75,8 @@ def run_repl(
     print("claw started. Type /exit to quit.", file=output)
     while True:
         try:
-            raw_input = read_input("User> ")
+            entered = read_input("User> ")
+            raw_input = await entered if inspect.isawaitable(entered) else entered
         except EOFError:
             print("bye.", file=output)
             return 0
@@ -94,12 +101,13 @@ def run_repl(
 
         try:
             if isinstance(parsed, ChatInput):
-                result = agent.run_turn(current_session_id, parsed.content)
-                if result.compaction is not None:
-                    _print_compaction(result.compaction, output, error_output)
-                print(f"Assistant> {result.reply}", file=output)
+                await _render_turn(
+                    agent.run_turn(current_session_id, parsed.content),
+                    output,
+                    error_output,
+                )
             elif isinstance(parsed, CompactCommand):
-                result = agent.compact_session(current_session_id, force=True)
+                result = await agent.compact_session(current_session_id, force=True)
                 _print_compaction(result, output, error_output)
             elif isinstance(parsed, SessionNew):
                 session = session_store.create()
@@ -145,12 +153,12 @@ def _initial_session_id(store: SessionStore, requested: str | None) -> str:
     return sessions[0].session_id if sessions else store.create().session_id
 
 
-def _read_terminal_input(prompt: str) -> str:
+async def _read_terminal_input(prompt: str) -> str:
     """Read one Unicode-aware line from the interactive terminal."""
     global _prompt_session
     if _prompt_session is None:
         _prompt_session = PromptSession()
-    return _prompt_session.prompt(prompt)
+    return await _prompt_session.prompt_async(prompt)
 
 
 def _print_sessions(store: SessionStore, current_session_id: str, output: TextIO) -> None:
@@ -174,8 +182,23 @@ def _print_history(session: Session, output: TextIO) -> None:
         print("(empty)", file=output)
         return
     for message in session.messages:
-        label = "User" if message["role"] == "user" else "Assistant"
-        print(f"{label}> {message['content']}", file=output)
+        role = message["role"]
+        if role == "user":
+            print(f"User> {message['content']}", file=output)
+        elif role == "tool":
+            print(
+                f"[tool_result] {message.get('name', '')} {message['content']}",
+                file=output,
+            )
+        elif message.get("tool_calls"):
+            for call in message["tool_calls"]:
+                function = call["function"]
+                print(
+                    f"[tool_call] {function['name']} {function['arguments']}",
+                    file=output,
+                )
+        else:
+            print(f"Assistant> {message['content']}", file=output)
 
 
 def _print_memories(store: MemoryStore, output: TextIO) -> None:
@@ -195,6 +218,9 @@ def _print_compaction(
     if result.status == "failed":
         print(f"[system] compaction failed: {result.detail}", file=error_output)
         return
+    if result.status == "unavailable":
+        print(f"[system] compaction unavailable: {result.detail}", file=error_output)
+        return
     if result.status == "skipped":
         print(f"[system] compaction skipped: {result.detail}", file=output)
         return
@@ -208,6 +234,78 @@ def _print_compaction(
     print(result.summary, file=output)
 
 
+async def _render_turn(
+    events: AsyncIterator[AgentEvent],
+    output: TextIO,
+    error_output: TextIO,
+) -> None:
+    streaming = False
+    async for event in events:
+        if event.type == "llm_delta":
+            if not streaming:
+                print("Assistant> ", end="", file=output, flush=True)
+                streaming = True
+            print(event.payload["delta"], end="", file=output, flush=True)
+        elif event.type == "tool_call":
+            if streaming:
+                print(file=output)
+                streaming = False
+            print(
+                f"[tool_call] {event.payload['name']} "
+                f"{event.payload['arguments']}",
+                file=output,
+            )
+        elif event.type == "tool_result":
+            if event.payload.get("truncated"):
+                detail = {
+                    "truncated": True,
+                    "originalCharacters": event.payload["originalCharacters"],
+                    "preview": event.payload["preview"],
+                }
+            else:
+                detail = (
+                    event.payload["result"]
+                    if event.payload["ok"]
+                    else {"error": event.payload["error"]}
+                )
+            print(
+                f"[tool_result] {event.payload['name']} "
+                f"{json.dumps(detail, ensure_ascii=False)}",
+                file=output,
+            )
+        elif event.type == "approval_required":
+            print(
+                f"[approval_required] {event.payload['name']}",
+                file=output,
+            )
+        elif event.type == "approval_resolved":
+            status = "approved" if event.payload["approved"] else "denied"
+            print(
+                f"[approval_resolved] {event.payload['name']} {status}: "
+                f"{event.payload['reason']}",
+                file=output,
+            )
+        elif event.type == "llm_message":
+            if streaming:
+                print(file=output)
+                streaming = False
+            else:
+                print(f"Assistant> {event.payload['content']}", file=output)
+        elif event.type == "compaction_done":
+            _print_compaction(
+                CompactionResult(**event.payload),
+                output,
+                error_output,
+            )
+        elif event.type == "warning":
+            print(f"[warning] {event.payload['message']}", file=error_output)
+        elif event.type == "error":
+            if streaming:
+                print("\n[stream interrupted]", file=output)
+                streaming = False
+            print(f"错误: {event.payload['message']}", file=error_output)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args:
@@ -216,6 +314,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         paths = RuntimePaths.from_environment()
+        configure_logging(paths.logs_dir)
         config = load_llm_config(paths.env_file)
         session_store = SessionStore(paths.sessions_dir)
         memory_store = MemoryStore(paths.memory_dir)
@@ -235,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
             memory_store,
             compactor,
         )
-        return run_repl(agent, session_store, memory_store)
+        return asyncio.run(run_repl(agent, session_store, memory_store))
     except KeyboardInterrupt:
         print("\n已中断。", file=sys.stderr)
         return 130
