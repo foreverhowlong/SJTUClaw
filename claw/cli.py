@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shlex
 import sys
 from collections.abc import Callable
 from typing import Protocol, TextIO
@@ -10,58 +9,58 @@ from typing import Protocol, TextIO
 from prompt_toolkit import PromptSession
 
 from claw.agent import AgentService
+from claw.cli_commands import (
+    HELP_TEXT,
+    ChatInput,
+    ExitCommand,
+    HelpCommand,
+    MemoryAdd,
+    MemoryDelete,
+    MemoryList,
+    SessionDelete,
+    SessionList,
+    SessionNew,
+    SessionRename,
+    SessionSwitch,
+    parse_cli_input,
+)
 from claw.config import load_llm_config
 from claw.context import ContextBuilder
-from claw.errors import ClawError
+from claw.errors import ClawError, CommandParseError
 from claw.llm import LLMClient
+from claw.paths import RuntimePaths
 from claw.session import Session
-from claw.store.memory import MemoryRecord, MemoryStore
-from claw.store.sessions import SessionStore, SessionSummary
+from claw.store.memory import MemoryStore
+from claw.store.sessions import SessionStore
 
 
-EXIT_COMMAND = "/exit"
 _prompt_session: PromptSession[str] | None = None
 
 
-class ConversationService(Protocol):
-    @property
-    def session(self) -> Session: ...
-
-    def send_message(self, user_input: str) -> str: ...
-
-    def create_session(self, title: str = "新会话") -> Session: ...
-
-    def list_sessions(self) -> list[SessionSummary]: ...
-
-    def switch_session(self, session_id: str) -> Session: ...
-
-    def rename_session(self, session_id: str, title: str) -> Session: ...
-
-    def delete_session(self, session_id: str) -> Session: ...
-
-    def add_memory(self, content: str) -> MemoryRecord: ...
-
-    def list_memories(self) -> list[MemoryRecord]: ...
-
-    def delete_memory(self, memory_id: str) -> None: ...
+class AgentRuntime(Protocol):
+    def run_turn(self, session_id: str, user_input: str) -> str: ...
 
 
 def run_repl(
-    service: ConversationService,
+    agent: AgentRuntime,
+    session_store: SessionStore,
+    memory_store: MemoryStore,
     *,
+    initial_session_id: str | None = None,
     input_fn: Callable[[str], str] | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
-    """Read user input continuously and render replies from the core service."""
+    """Render local commands and agent turns while owning CLI session state."""
     output = stdout or sys.stdout
     error_output = stderr or sys.stderr
     read_input = input_fn or _read_terminal_input
+    current_session_id = _initial_session_id(session_store, initial_session_id)
 
     print("claw started. Type /exit to quit.", file=output)
     while True:
         try:
-            user_input = read_input("User> ").strip()
+            raw_input = read_input("User> ")
         except EOFError:
             print("bye.", file=output)
             return 0
@@ -69,36 +68,67 @@ def run_repl(
             print("\n已中断。", file=error_output)
             return 130
 
-        if user_input == EXIT_COMMAND:
+        try:
+            parsed = parse_cli_input(raw_input)
+        except CommandParseError as exc:
+            print(f"错误: {exc}", file=error_output)
+            continue
+        if parsed is None:
+            continue
+
+        if isinstance(parsed, ExitCommand):
             print("bye.", file=output)
             return 0
-        if not user_input:
-            continue
-
-        if user_input == "/session" or user_input.startswith("/session "):
-            try:
-                _handle_session_command(service, user_input, output)
-            except ClawError as exc:
-                print(f"错误: {exc}", file=error_output)
-            continue
-
-        if user_input == "/memory" or user_input.startswith("/memory "):
-            try:
-                _handle_memory_command(service, user_input, output)
-            except ClawError as exc:
-                print(f"错误: {exc}", file=error_output)
+        if isinstance(parsed, HelpCommand):
+            print(HELP_TEXT, file=output)
             continue
 
         try:
-            reply = service.send_message(user_input)
+            if isinstance(parsed, ChatInput):
+                reply = agent.run_turn(current_session_id, parsed.content)
+                print(f"Assistant> {reply}", file=output)
+            elif isinstance(parsed, SessionNew):
+                session = session_store.create()
+                current_session_id = session.session_id
+                print(f"Created session: {session.session_id}  {session.title}", file=output)
+            elif isinstance(parsed, SessionList):
+                _print_sessions(session_store, current_session_id, output)
+            elif isinstance(parsed, SessionSwitch):
+                session = session_store.load(parsed.session_id)
+                current_session_id = session.session_id
+                print(f"Switched to session: {session.session_id}", file=output)
+                _print_history(session, output)
+            elif isinstance(parsed, SessionRename):
+                session = session_store.rename(parsed.session_id, parsed.title)
+                print(f"Renamed session: {session.session_id}  {session.title}", file=output)
+            elif isinstance(parsed, SessionDelete):
+                deleting_current = parsed.session_id == current_session_id
+                session_store.delete(parsed.session_id)
+                print(f"Deleted session: {parsed.session_id}", file=output)
+                if deleting_current:
+                    current_session_id = _initial_session_id(session_store, None)
+                    current = session_store.load(current_session_id)
+                    print(f"Current session: {current.session_id}  {current.title}", file=output)
+            elif isinstance(parsed, MemoryAdd):
+                memory = memory_store.add(parsed.content)
+                print(f"Added memory: {memory.memory_id}", file=output)
+            elif isinstance(parsed, MemoryList):
+                _print_memories(memory_store, output)
+            elif isinstance(parsed, MemoryDelete):
+                memory_store.delete(parsed.memory_id)
+                print(f"Deleted memory: {parsed.memory_id}", file=output)
         except KeyboardInterrupt:
             print("\n已中断。", file=error_output)
             return 130
         except ClawError as exc:
             print(f"错误: {exc}", file=error_output)
-            continue
 
-        print(f"Assistant> {reply}", file=output)
+
+def _initial_session_id(store: SessionStore, requested: str | None) -> str:
+    if requested is not None:
+        return store.load(requested).session_id
+    sessions = store.list()
+    return sessions[0].session_id if sessions else store.create().session_id
 
 
 def _read_terminal_input(prompt: str) -> str:
@@ -109,62 +139,16 @@ def _read_terminal_input(prompt: str) -> str:
     return _prompt_session.prompt(prompt)
 
 
-def _handle_session_command(
-    service: ConversationService,
-    command: str,
-    output: TextIO,
-) -> None:
-    try:
-        parts = shlex.split(command)
-    except ValueError as exc:
-        print(f"Session 命令格式错误: {exc}", file=output)
-        return
-
-    if len(parts) < 2:
-        _print_session_usage(output)
-        return
-
-    action = parts[1]
-    if action == "new" and len(parts) == 2:
-        session = service.create_session()
-        print(f"Created session: {session.session_id}  {session.title}", file=output)
-        return
-
-    if action == "list" and len(parts) == 2:
-        sessions = service.list_sessions()
-        print("Sessions:", file=output)
-        for item in sessions:
-            marker = "*" if item.session_id == service.session.session_id else " "
-            updated = item.updated_at.astimezone().strftime("%Y-%m-%d %H:%M")
-            print(
-                f"{marker} {item.session_id}  {item.title}  "
-                f"messages={item.message_count}  updated={updated}",
-                file=output,
-            )
-        return
-
-    if action == "switch" and len(parts) == 3:
-        session = service.switch_session(parts[2])
-        print(f"Switched to session: {session.session_id}", file=output)
-        _print_history(session, output)
-        return
-
-    if action == "rename" and len(parts) >= 4:
-        title = " ".join(parts[3:])
-        session = service.rename_session(parts[2], title)
-        print(f"Renamed session: {session.session_id}  {session.title}", file=output)
-        return
-
-    if action == "delete" and len(parts) == 3:
-        deleted_id = parts[2]
-        deleting_current = service.session.session_id == deleted_id
-        current = service.delete_session(deleted_id)
-        print(f"Deleted session: {deleted_id}", file=output)
-        if deleting_current:
-            print(f"Current session: {current.session_id}  {current.title}", file=output)
-        return
-
-    _print_session_usage(output)
+def _print_sessions(store: SessionStore, current_session_id: str, output: TextIO) -> None:
+    print("Sessions:", file=output)
+    for item in store.list():
+        marker = "*" if item.session_id == current_session_id else " "
+        updated = item.updated_at.astimezone().strftime("%Y-%m-%d %H:%M")
+        print(
+            f"{marker} {item.session_id}  {item.title}  "
+            f"messages={item.message_count}  updated={updated}",
+            file=output,
+        )
 
 
 def _print_history(session: Session, output: TextIO) -> None:
@@ -177,57 +161,13 @@ def _print_history(session: Session, output: TextIO) -> None:
         print(f"{label}> {message['content']}", file=output)
 
 
-def _print_session_usage(output: TextIO) -> None:
-    print(
-        "用法: /session new | list | switch <sessionId> | "
-        "rename <sessionId> <title> | delete <sessionId>",
-        file=output,
-    )
-
-
-def _handle_memory_command(
-    service: ConversationService,
-    command: str,
-    output: TextIO,
-) -> None:
-    try:
-        parts = shlex.split(command)
-    except ValueError as exc:
-        print(f"Memory 命令格式错误: {exc}", file=output)
-        return
-
-    if len(parts) < 2:
-        _print_memory_usage(output)
-        return
-
-    action = parts[1]
-    if action == "add" and len(parts) >= 3:
-        memory = service.add_memory(" ".join(parts[2:]))
-        print(f"Added memory: {memory.memory_id}", file=output)
-        return
-
-    if action == "list" and len(parts) == 2:
-        memories = service.list_memories()
-        print("Memories:", file=output)
-        if not memories:
-            print("(empty)", file=output)
-        for memory in memories:
-            print(f"{memory.memory_id}  {memory.content}", file=output)
-        return
-
-    if action == "delete" and len(parts) == 3:
-        service.delete_memory(parts[2])
-        print(f"Deleted memory: {parts[2]}", file=output)
-        return
-
-    _print_memory_usage(output)
-
-
-def _print_memory_usage(output: TextIO) -> None:
-    print(
-        "用法: /memory add <content> | list | delete <memoryId>",
-        file=output,
-    )
+def _print_memories(store: MemoryStore, output: TextIO) -> None:
+    memories = store.list()
+    print("Memories:", file=output)
+    if not memories:
+        print("(empty)", file=output)
+    for memory in memories:
+        print(f"{memory.memory_id}  {memory.content}", file=output)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -237,22 +177,26 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        config = load_llm_config()
-        client = LLMClient(config)
-        service = AgentService(
-            client,
-            store=SessionStore(),
-            context_builder=ContextBuilder.from_files(),
-            memory_store=MemoryStore(),
+        paths = RuntimePaths.from_environment()
+        config = load_llm_config(paths.env_file)
+        session_store = SessionStore(paths.sessions_dir)
+        memory_store = MemoryStore(paths.memory_dir)
+        agent = AgentService(
+            LLMClient(config),
+            session_store,
+            ContextBuilder.from_files(
+                paths.system_prompt_file,
+                paths.soul_file,
+            ),
+            memory_store,
         )
+        return run_repl(agent, session_store, memory_store)
     except KeyboardInterrupt:
         print("\n已中断。", file=sys.stderr)
         return 130
     except ClawError as exc:
         print(f"错误: {exc}", file=sys.stderr)
         return 1
-
-    return run_repl(service)
 
 
 if __name__ == "__main__":

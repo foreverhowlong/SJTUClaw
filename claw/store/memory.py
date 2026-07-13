@@ -23,7 +23,7 @@ class MemoryRecord:
 class MemoryStore:
     """Persist each manually managed memory as one readable Markdown file."""
 
-    def __init__(self, root: str | Path = "data/memory") -> None:
+    def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
 
     def add(self, content: str) -> MemoryRecord:

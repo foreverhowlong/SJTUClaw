@@ -17,5 +17,13 @@ class SessionError(ClawError):
     """Raised when session state cannot be loaded or persisted safely."""
 
 
+class SessionConflictError(SessionError):
+    """Raised when a turn is based on a stale session revision."""
+
+
 class MemoryError(ClawError):
     """Raised when long-term memory cannot be loaded or persisted safely."""
+
+
+class CommandParseError(ClawError):
+    """Raised when a local CLI command is unknown or malformed."""

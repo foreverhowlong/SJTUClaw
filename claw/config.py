@@ -5,8 +5,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
-
 from claw.errors import ConfigError
 
 
@@ -29,10 +27,14 @@ def load_env_file(path: Path) -> dict[str, str]:
     project, avoiding an extra dependency for Step 0.
     """
     values: dict[str, str] = {}
-    if not path.exists():
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return values
+    except (OSError, UnicodeError) as exc:
+        raise ConfigError(f"读取配置文件失败 {path}: {exc}") from exc
 
-    for line_no, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_no, raw_line in enumerate(content.splitlines(), start=1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -51,20 +53,25 @@ def load_llm_config(env_path: Path | str = ".env") -> LLMConfig:
     env_file_values = load_env_file(Path(env_path))
 
     def get(name: str, default: str | None = None) -> str | None:
-        return os.environ.get(name) or env_file_values.get(name) or default
+        raw = os.environ[name] if name in os.environ else env_file_values.get(name, default)
+        return raw.strip() if raw is not None else None
 
     api_key = get("LLM_API_KEY")
     model = get("LLM_MODEL")
     base_url = get("LLM_BASE_URL", DEFAULT_BASE_URL)
     timeout_raw = get("LLM_TIMEOUT", str(DEFAULT_TIMEOUT_SECONDS))
 
-    missing = [name for name, value in (("LLM_API_KEY", api_key), ("LLM_MODEL", model)) if not value]
+    missing = [
+        name
+        for name, value in (("LLM_API_KEY", api_key), ("LLM_MODEL", model))
+        if not value
+    ]
     if missing:
         names = ", ".join(missing)
         raise ConfigError(f"缺少必要配置: {names}。请在 .env 或环境变量中设置。")
 
-    api_key_value = cast(str, api_key)
-    model_value = cast(str, model)
+    if not base_url:
+        raise ConfigError("LLM_BASE_URL 不能为空。")
 
     try:
         timeout_seconds = float(timeout_raw or DEFAULT_TIMEOUT_SECONDS)
@@ -75,9 +82,9 @@ def load_llm_config(env_path: Path | str = ".env") -> LLMConfig:
         raise ConfigError("LLM_TIMEOUT 必须大于 0。")
 
     return LLMConfig(
-        api_key=api_key_value.strip(),
-        base_url=(base_url or DEFAULT_BASE_URL).strip().rstrip("/"),
-        model=model_value.strip(),
+        api_key=api_key,
+        base_url=base_url.rstrip("/"),
+        model=model,
         timeout_seconds=timeout_seconds,
     )
 

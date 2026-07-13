@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from collections.abc import Sequence
+from importlib import resources
+from pathlib import Path
 
 from claw.errors import ConfigError
 from claw.llm import Message
-from claw.session import Session
 from claw.store.memory import MemoryRecord
 
 
-DEFAULT_SYSTEM_PROMPT_PATH = Path("prompts/system_prompt.md")
-DEFAULT_SOUL_PATH = Path("prompts/soul.md")
+DEFAULT_SYSTEM_PROMPT_RESOURCE = "prompts/system_prompt.md"
+DEFAULT_SOUL_RESOURCE = "prompts/soul.md"
 
 
 class ContextBuilder:
@@ -31,17 +31,21 @@ class ContextBuilder:
     @classmethod
     def from_files(
         cls,
-        system_prompt_path: str | Path = DEFAULT_SYSTEM_PROMPT_PATH,
-        soul_path: str | Path = DEFAULT_SOUL_PATH,
+        system_prompt_path: str | Path | None = None,
+        soul_path: str | Path | None = None,
     ) -> ContextBuilder:
         return cls(
-            _load_context_file(Path(system_prompt_path), "system prompt"),
-            _load_context_file(Path(soul_path), "soul"),
+            _load_context(
+                system_prompt_path,
+                DEFAULT_SYSTEM_PROMPT_RESOURCE,
+                "system prompt",
+            ),
+            _load_context(soul_path, DEFAULT_SOUL_RESOURCE, "soul"),
         )
 
     def build(
         self,
-        session: Session,
+        messages: Sequence[Message],
         memories: Sequence[MemoryRecord] = (),
     ) -> list[Message]:
         stable_sections = [
@@ -55,8 +59,29 @@ class ContextBuilder:
             stable_sections.append(f"[Memory]\n{rendered_memories}")
         return [
             {"role": "system", "content": "\n\n".join(stable_sections)},
-            *session.messages,
+            *(message.copy() for message in messages),
         ]
+
+
+def _load_context(
+    path: str | Path | None,
+    resource_name: str,
+    label: str,
+) -> str:
+    if path is not None:
+        return _load_context_file(Path(path), label)
+    try:
+        content = (
+            resources.files("claw")
+            .joinpath(resource_name)
+            .read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError, UnicodeError) as exc:
+        raise ConfigError(f"读取默认 {label} 资源失败 {resource_name}: {exc}") from exc
+    normalized = content.strip()
+    if not normalized:
+        raise ConfigError(f"默认 {label} 资源不能为空: {resource_name}。")
+    return normalized
 
 
 def _load_context_file(path: Path, label: str) -> str:

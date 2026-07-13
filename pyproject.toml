@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "A minimal agent runtime for the SJTUClaw course project."
 requires-python = ">=3.11"
 dependencies = [
+    "filelock>=3.20.3",
     "openai>=2.44.0",
     "prompt-toolkit>=3.0.52",
 ]
@@ -22,3 +23,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["claw*"]
+
+[tool.setuptools.package-data]
+claw = ["prompts/*.md"]

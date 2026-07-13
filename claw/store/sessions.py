@@ -1,18 +1,28 @@
-"""File-backed storage for independent conversation sessions."""
+"""Append-only storage for independent conversation sessions."""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+from uuid import uuid4
 
-from claw.errors import SessionError
+from filelock import FileLock, Timeout
+
+from claw.errors import SessionConflictError, SessionError
 from claw.llm import Message
 from claw.session import Session
+
+
+SESSION_ID_PATTERN = re.compile(r"session_[0-9a-f]{12}")
+LOCK_TIMEOUT_SECONDS = 10
 
 
 @dataclass(frozen=True)
@@ -24,24 +34,59 @@ class SessionSummary:
     updated_at: datetime
 
 
-class SessionStore:
-    """Persist each session in its own directory under ``data/sessions``."""
+@dataclass(frozen=True)
+class _MessageLog:
+    messages: tuple[Message, ...]
+    revision: int
+    last_committed_at: datetime | None
 
-    def __init__(self, root: str | Path = "data/sessions") -> None:
+
+class SessionStore:
+    """Persist metadata plus append-only, revisioned turn records."""
+
+    def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
 
     def create(self, title: str = "新会话") -> Session:
-        session = Session(title=title.strip() or "新会话")
-        while self._session_dir(session.session_id).exists():
-            session = Session(title=title.strip() or "新会话")
-        self.save(session)
+        normalized_title = title.strip() or "新会话"
+        while True:
+            session = Session(title=normalized_title)
+            session_dir = self._session_dir(session.session_id)
+            if not session_dir.exists():
+                break
+
+        temporary = self.root / f".{session.session_id}.{uuid4().hex}.tmp"
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            temporary.mkdir()
+            self._atomic_write(temporary / "messages.jsonl", "")
+            self._atomic_write(
+                temporary / "meta.json",
+                self._serialize_meta(session),
+            )
+            os.replace(temporary, session_dir)
+        except (OSError, TypeError, ValueError) as exc:
+            raise SessionError(f"创建 session 失败: {exc}") from exc
+        finally:
+            try:
+                shutil.rmtree(temporary)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
         return session
 
     def list(self) -> list[SessionSummary]:
         if not self.root.exists():
             return []
         try:
-            directories = sorted(path for path in self.root.iterdir() if path.is_dir())
+            directories = sorted(
+                path
+                for path in self.root.iterdir()
+                if path.is_dir()
+                and not path.is_symlink()
+                and SESSION_ID_PATTERN.fullmatch(path.name)
+            )
         except OSError as exc:
             raise SessionError(f"无法列出 session 目录 {self.root}: {exc}") from exc
 
@@ -49,11 +94,84 @@ class SessionStore:
         return sorted(summaries, key=lambda item: item.updated_at, reverse=True)
 
     def load(self, session_id: str) -> Session:
+        with self._locked(session_id):
+            return self._load_unlocked(session_id)
+
+    def commit_turn(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        messages: Sequence[Message],
+    ) -> Session:
+        committed_messages = self._validate_turn(messages)
+        with self._locked(session_id):
+            snapshot = self._load_unlocked(session_id)
+            if snapshot.revision != expected_revision:
+                raise SessionConflictError(
+                    f"Session {session_id} 已更新: expected revision "
+                    f"{expected_revision}, current revision {snapshot.revision}。"
+                )
+
+            committed_at = datetime.now(timezone.utc)
+            record = {
+                "type": "turn",
+                "revision": snapshot.revision + 1,
+                "turnId": f"turn_{uuid4().hex[:12]}",
+                "committedAt": committed_at.isoformat(),
+                "messages": committed_messages,
+            }
+            self._append_record(
+                self._session_dir(session_id) / "messages.jsonl",
+                record,
+            )
+            return Session(
+                session_id=snapshot.session_id,
+                title=snapshot.title,
+                created_at=snapshot.created_at,
+                updated_at=committed_at,
+                revision=snapshot.revision + 1,
+                _messages=tuple([*snapshot.messages, *committed_messages]),
+            )
+
+    def rename(self, session_id: str, title: str) -> Session:
+        normalized = title.strip()
+        if not normalized:
+            raise SessionError("session title 不能为空。")
+
+        with self._locked(session_id):
+            snapshot = self._load_unlocked(session_id)
+            renamed = Session(
+                session_id=snapshot.session_id,
+                title=normalized,
+                created_at=snapshot.created_at,
+                updated_at=datetime.now(timezone.utc),
+                revision=snapshot.revision,
+                _messages=tuple(snapshot.messages),
+            )
+            try:
+                self._atomic_write(
+                    self._session_dir(session_id) / "meta.json",
+                    self._serialize_meta(renamed),
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                raise SessionError(f"重命名 session {session_id} 失败: {exc}") from exc
+            return renamed
+
+    def delete(self, session_id: str) -> None:
+        with self._locked(session_id):
+            session_dir = self._existing_session_dir(session_id)
+            try:
+                shutil.rmtree(session_dir)
+            except OSError as exc:
+                raise SessionError(f"删除 session {session_id} 失败: {exc}") from exc
+
+    def _load_unlocked(self, session_id: str) -> Session:
         session_dir = self._existing_session_dir(session_id)
         meta_path = session_dir / "meta.json"
         messages_path = session_dir / "messages.jsonl"
         meta = self._read_meta(meta_path)
-        messages = self._read_messages(messages_path)
+        log = self._read_log(messages_path)
 
         if meta.get("sessionId") != session_id:
             raise SessionError(
@@ -64,51 +182,152 @@ class SessionStore:
             raise SessionError(f"Session 数据损坏: {meta_path} 中的 title 无效。")
 
         created_at = self._parse_datetime(meta.get("createdAt"), meta_path, "createdAt")
-        updated_at = self._parse_datetime(meta.get("updatedAt"), meta_path, "updatedAt")
+        metadata_updated_at = self._parse_datetime(
+            meta.get("updatedAt"),
+            meta_path,
+            "updatedAt",
+        )
+        updated_at = max(
+            metadata_updated_at,
+            log.last_committed_at or metadata_updated_at,
+        )
         return Session(
             session_id=session_id,
             title=title,
             created_at=created_at,
             updated_at=updated_at,
-            _messages=messages,
+            revision=log.revision,
+            _messages=log.messages,
         )
 
-    def save(self, session: Session) -> None:
-        session_dir = self._session_dir(session.session_id)
+    def _read_log(self, path: Path) -> _MessageLog:
         try:
-            session_dir.mkdir(parents=True, exist_ok=True)
-            meta = {
-                "sessionId": session.session_id,
-                "title": session.title,
-                "createdAt": session.created_at.isoformat(),
-                "updatedAt": session.updated_at.isoformat(),
-            }
-            messages_text = "".join(
-                json.dumps(message, ensure_ascii=False) + "\n" for message in session.messages
-            )
-            self._atomic_write(session_dir / "messages.jsonl", messages_text)
-            self._atomic_write(
-                session_dir / "meta.json",
-                json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
-            )
-        except (OSError, TypeError, ValueError) as exc:
-            raise SessionError(f"保存 session {session.session_id} 失败: {exc}") from exc
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError as exc:
+            raise SessionError(f"Session 数据损坏: 缺少 {path}。") from exc
+        except (OSError, UnicodeError) as exc:
+            raise SessionError(f"读取 session 消息失败 {path}: {exc}") from exc
 
-    def rename(self, session_id: str, title: str) -> Session:
-        session = self.load(session_id)
-        try:
-            session.rename(title)
-        except ValueError as exc:
-            raise SessionError(str(exc)) from exc
-        self.save(session)
-        return session
+        messages: list[Message] = []
+        revision = 0
+        last_committed_at: datetime | None = None
+        for line_number, line in enumerate(lines, start=1):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SessionError(
+                    f"Session 数据损坏: {path} 第 {line_number} 行不是有效 JSON。"
+                ) from exc
 
-    def delete(self, session_id: str) -> None:
-        session_dir = self._existing_session_dir(session_id)
+            if self._is_message(record):
+                messages.append(self._copy_message(record))
+                revision += 1
+                continue
+
+            if not isinstance(record, dict) or record.get("type") != "turn":
+                raise SessionError(
+                    f"Session 数据损坏: {path} 第 {line_number} 行记录格式无效。"
+                )
+            expected_record_revision = revision + 1
+            if record.get("revision") != expected_record_revision:
+                raise SessionError(
+                    f"Session 数据损坏: {path} 第 {line_number} 行 revision 无效。"
+                )
+            turn_messages = record.get("messages")
+            if not isinstance(turn_messages, list):
+                raise SessionError(
+                    f"Session 数据损坏: {path} 第 {line_number} 行 messages 无效。"
+                )
+            try:
+                validated = self._validate_turn(turn_messages)
+            except SessionError as exc:
+                raise SessionError(
+                    f"Session 数据损坏: {path} 第 {line_number} 行: {exc}"
+                ) from exc
+            committed_at = self._parse_datetime(
+                record.get("committedAt"),
+                path,
+                f"第 {line_number} 行 committedAt",
+            )
+            messages.extend(validated)
+            revision = expected_record_revision
+            last_committed_at = committed_at
+
+        return _MessageLog(tuple(messages), revision, last_committed_at)
+
+    @staticmethod
+    def _validate_turn(messages: Sequence[Message]) -> list[Message]:
+        if len(messages) != 2:
+            raise SessionError(
+                "一个已完成 turn 必须恰好包含 user 和 assistant 消息。"
+            )
+        copied = [SessionStore._copy_message(message) for message in messages]
+        if [message["role"] for message in copied] != ["user", "assistant"]:
+            raise SessionError("turn 消息顺序必须是 user, assistant。")
+        return copied
+
+    @staticmethod
+    def _is_message(value: Any) -> bool:
+        return (
+            isinstance(value, dict)
+            and value.get("role") in {"user", "assistant"}
+            and isinstance(value.get("content"), str)
+        )
+
+    @staticmethod
+    def _copy_message(value: Any) -> Message:
+        if not SessionStore._is_message(value):
+            raise SessionError("消息格式无效。")
+        return {"role": value["role"], "content": value["content"]}
+
+    def _append_record(self, path: Path, record: dict[str, Any]) -> None:
         try:
-            shutil.rmtree(session_dir)
+            encoded = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise SessionError(f"序列化 session turn 失败: {exc}") from exc
+
+        try:
+            with path.open("a+b") as handle:
+                handle.seek(0, os.SEEK_END)
+                original_size = handle.tell()
+                try:
+                    written = handle.write(encoded)
+                    if written != len(encoded):
+                        raise OSError(f"short write: {written}/{len(encoded)} bytes")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                except OSError as exc:
+                    try:
+                        handle.seek(original_size)
+                        handle.truncate()
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    except OSError as rollback_exc:
+                        raise SessionError(
+                            f"提交 session turn 失败且回滚失败: {exc}; {rollback_exc}"
+                        ) from rollback_exc
+                    raise SessionError(f"提交 session turn 失败: {exc}") from exc
+        except FileNotFoundError as exc:
+            raise SessionError(f"Session 数据损坏: 缺少 {path}。") from exc
         except OSError as exc:
-            raise SessionError(f"删除 session {session_id} 失败: {exc}") from exc
+            raise SessionError(f"打开 session 消息文件失败 {path}: {exc}") from exc
+
+    @contextmanager
+    def _locked(self, session_id: str) -> Iterator[None]:
+        self._validate_session_id(session_id)
+        lock_dir = self.root / ".locks"
+        try:
+            lock_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise SessionError(f"创建 session 锁目录失败 {lock_dir}: {exc}") from exc
+        lock = FileLock(lock_dir / f"{session_id}.lock", timeout=LOCK_TIMEOUT_SECONDS)
+        try:
+            with lock:
+                yield
+        except Timeout as exc:
+            raise SessionError(f"等待 session {session_id} 锁超时。") from exc
+        except OSError as exc:
+            raise SessionError(f"获取 session {session_id} 锁失败: {exc}") from exc
 
     def _summary(self, session: Session) -> SessionSummary:
         return SessionSummary(
@@ -120,15 +339,19 @@ class SessionStore:
         )
 
     def _session_dir(self, session_id: str) -> Path:
-        if not session_id or session_id in {".", ".."} or Path(session_id).name != session_id:
-            raise SessionError(f"无效的 sessionId: {session_id!r}。")
+        self._validate_session_id(session_id)
         return self.root / session_id
 
     def _existing_session_dir(self, session_id: str) -> Path:
         session_dir = self._session_dir(session_id)
-        if not session_dir.is_dir():
+        if session_dir.is_symlink() or not session_dir.is_dir():
             raise SessionError(f"Session 不存在: {session_id}。")
         return session_dir
+
+    @staticmethod
+    def _validate_session_id(session_id: str) -> None:
+        if not SESSION_ID_PATTERN.fullmatch(session_id):
+            raise SessionError(f"无效的 sessionId: {session_id!r}。")
 
     def _read_meta(self, path: Path) -> dict[str, Any]:
         try:
@@ -140,33 +363,6 @@ class SessionStore:
         if not isinstance(value, dict):
             raise SessionError(f"Session 数据损坏: {path} 必须包含 JSON object。")
         return value
-
-    def _read_messages(self, path: Path) -> list[Message]:
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except FileNotFoundError as exc:
-            raise SessionError(f"Session 数据损坏: 缺少 {path}。") from exc
-        except (OSError, UnicodeError) as exc:
-            raise SessionError(f"读取 session 消息失败 {path}: {exc}") from exc
-
-        messages: list[Message] = []
-        for line_number, line in enumerate(lines, start=1):
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise SessionError(
-                    f"Session 数据损坏: {path} 第 {line_number} 行不是有效 JSON。"
-                ) from exc
-            if (
-                not isinstance(message, dict)
-                or message.get("role") not in {"user", "assistant"}
-                or not isinstance(message.get("content"), str)
-            ):
-                raise SessionError(
-                    f"Session 数据损坏: {path} 第 {line_number} 行消息格式无效。"
-                )
-            messages.append({"role": message["role"], "content": message["content"]})
-        return messages
 
     @staticmethod
     def _parse_datetime(value: Any, path: Path, field: str) -> datetime:
@@ -181,8 +377,21 @@ class SessionStore:
         return parsed
 
     @staticmethod
+    def _serialize_meta(session: Session) -> str:
+        return json.dumps(
+            {
+                "sessionId": session.session_id,
+                "title": session.title,
+                "createdAt": session.created_at.isoformat(),
+                "updatedAt": session.updated_at.isoformat(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n"
+
+    @staticmethod
     def _atomic_write(path: Path, content: str) -> None:
-        temporary = path.with_name(f".{path.name}.tmp")
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
         try:
             with temporary.open("w", encoding="utf-8") as handle:
                 handle.write(content)
