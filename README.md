@@ -1,6 +1,6 @@
 # SJTUClaw
 
-SJTUClaw is a minimal agent runtime course project. The current implementation covers Step 0: reading LLM configuration, sending one OpenAI-compatible chat request, and printing the assistant reply.
+SJTUClaw is a minimal agent runtime course project. The current implementation covers Step 1: running an in-memory, multi-turn CLI conversation through an OpenAI-compatible LLM API.
 
 ## Setup
 
@@ -27,11 +27,17 @@ LLM_MODEL=gpt-4.1-mini
 uv run python -m claw.cli
 ```
 
-You can also pass a custom prompt:
+The CLI keeps the current conversation history for the lifetime of the process and sends it with every request. Type `/exit` to leave the conversation:
 
-```bash
-uv run python -m claw.cli "你好，请用一句话介绍你自己。"
+```text
+claw started. Type /exit to quit.
+User> 你好，我叫小明。
+Assistant> 你好，小明！
+User> /exit
+bye.
 ```
+
+Session history is currently in memory only and is discarded when the process exits.
 
 ## Test
 
