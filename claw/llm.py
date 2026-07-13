@@ -18,10 +18,8 @@ from openai import (
 
 from claw.config import LLMConfig
 from claw.errors import LLMError
+from claw.messages import Message
 from claw.tools.registry import ToolCall
-
-
-Message = dict[str, Any]
 
 
 @dataclass(frozen=True)

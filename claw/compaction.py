@@ -9,7 +9,7 @@ from typing import Any, Literal, Protocol
 
 from claw.context import project_messages
 from claw.errors import ConfigError, LLMError, SessionError
-from claw.llm import Message
+from claw.messages import Message
 from claw.store.sessions import SessionStore
 
 

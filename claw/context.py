@@ -9,7 +9,7 @@ from importlib import resources
 from pathlib import Path
 
 from claw.errors import ConfigError
-from claw.llm import Message
+from claw.messages import Message
 from claw.store.memory import MemoryRecord
 
 

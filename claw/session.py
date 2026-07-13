@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from claw.llm import Message
+from claw.messages import Message
 
 
 @dataclass(frozen=True)

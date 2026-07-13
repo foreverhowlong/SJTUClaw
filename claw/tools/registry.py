@@ -1,4 +1,4 @@
-"""Tool definitions, argument validation, and dispatch."""
+"""Tool definitions, registration, and runtime dispatch."""
 
 from __future__ import annotations
 
@@ -6,23 +6,17 @@ import asyncio
 import inspect
 import json
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from claw.errors import ToolError
+from claw.tools.schema import validate_arguments, validate_input_schema
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
 SafetyLevel = Literal["read_only", "advanced"]
 DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
-SUPPORTED_ARGUMENT_TYPES = frozenset({"string", "integer", "number", "boolean"})
-TOP_LEVEL_SCHEMA_KEYS = frozenset(
-    {"type", "properties", "required", "additionalProperties", "description"}
-)
-PROPERTY_SCHEMA_KEYS = frozenset({"type", "description", "enum"})
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -70,7 +64,7 @@ class ToolDefinition:
             raise ToolError(f"advanced tool 必须要求 approval: {self.name}。")
         if self.safety_level not in {"read_only", "advanced"}:
             raise ToolError(f"tool safety level 无效: {self.name}。")
-        _validate_input_schema(self.name, self.input_schema)
+        validate_input_schema(self.name, self.input_schema)
 
     def api_definition(self) -> dict[str, Any]:
         return {
@@ -121,7 +115,7 @@ class ToolRegistry:
                 False,
                 error=f"tool arguments 不是有效 JSON: {exc.msg}。",
             )
-        error = _validate_object(arguments, tool.input_schema)
+        error = validate_arguments(arguments, tool.input_schema)
         if error:
             return ToolResult(call.call_id, call.name, False, error=error)
         if tool.requires_approval and not approved:
@@ -177,113 +171,3 @@ async def _invoke_handler(handler: ToolHandler, arguments: dict[str, Any]) -> An
     if inspect.isawaitable(value):
         return await value
     return value
-
-
-def _validate_object(value: Any, schema: Mapping[str, Any]) -> str:
-    if not isinstance(value, dict):
-        return "tool arguments 必须是 JSON object。"
-    properties = schema.get("properties", {})
-    required = schema.get("required", [])
-    if not isinstance(properties, dict) or not isinstance(required, list):
-        return "tool input schema 无效。"
-    for name in required:
-        if name not in value:
-            return f"tool arguments 缺少必填字段: {name}。"
-    if schema.get("additionalProperties") is False:
-        extra = sorted(set(value) - set(properties))
-        if extra:
-            return f"tool arguments 包含未知字段: {', '.join(extra)}。"
-    for name, item in value.items():
-        property_schema = properties.get(name)
-        if property_schema is None:
-            continue
-        expected = property_schema.get("type")
-        if not _matches_type(item, expected):
-            return f"tool argument {name} 必须是 {expected}。"
-        enum = property_schema.get("enum")
-        if enum is not None and item not in enum:
-            return f"tool argument {name} 必须是 enum 中的一个值。"
-    return ""
-
-
-def _validate_input_schema(name: str, schema: Any) -> None:
-    if not isinstance(schema, dict) or schema.get("type") != "object":
-        raise ToolError(f"tool {name} input schema 必须描述 object。")
-    unsupported = sorted(set(schema) - TOP_LEVEL_SCHEMA_KEYS)
-    if unsupported:
-        raise ToolError(
-            f"tool {name} input schema 包含不支持的关键字: {', '.join(unsupported)}。"
-        )
-
-    properties = schema.get("properties", {})
-    required = schema.get("required", [])
-    additional = schema.get("additionalProperties", True)
-    description = schema.get("description")
-    if not isinstance(properties, dict):
-        raise ToolError(f"tool {name} input schema properties 必须是 object。")
-    if (
-        not isinstance(required, list)
-        or any(not isinstance(item, str) for item in required)
-        or len(set(required)) != len(required)
-    ):
-        raise ToolError(f"tool {name} input schema required 必须是无重复字符串列表。")
-    missing_properties = sorted(set(required) - set(properties))
-    if missing_properties:
-        raise ToolError(
-            f"tool {name} required 字段没有对应 properties: "
-            f"{', '.join(missing_properties)}。"
-        )
-    if not isinstance(additional, bool):
-        raise ToolError(
-            f"tool {name} additionalProperties 当前只支持 boolean。"
-        )
-    if description is not None and not isinstance(description, str):
-        raise ToolError(f"tool {name} input schema description 必须是 string。")
-
-    for property_name, property_schema in properties.items():
-        if not isinstance(property_name, str) or not property_name:
-            raise ToolError(f"tool {name} property name 必须是非空字符串。")
-        if not isinstance(property_schema, dict):
-            raise ToolError(
-                f"tool {name} property {property_name} schema 必须是 object。"
-            )
-        unsupported = sorted(set(property_schema) - PROPERTY_SCHEMA_KEYS)
-        if unsupported:
-            raise ToolError(
-                f"tool {name} property {property_name} 包含不支持的关键字: "
-                f"{', '.join(unsupported)}。"
-            )
-        expected = property_schema.get("type")
-        if expected not in SUPPORTED_ARGUMENT_TYPES:
-            supported = ", ".join(sorted(SUPPORTED_ARGUMENT_TYPES))
-            raise ToolError(
-                f"tool {name} property {property_name} type 不支持: "
-                f"{expected!r}；当前支持 {supported}。"
-            )
-        description = property_schema.get("description")
-        if description is not None and not isinstance(description, str):
-            raise ToolError(
-                f"tool {name} property {property_name} description 必须是 string。"
-            )
-        enum = property_schema.get("enum")
-        if enum is not None:
-            if not isinstance(enum, list) or not enum:
-                raise ToolError(
-                    f"tool {name} property {property_name} enum 必须是非空列表。"
-                )
-            if any(not _matches_type(item, expected) for item in enum):
-                raise ToolError(
-                    f"tool {name} property {property_name} enum 值与 type 不匹配。"
-                )
-
-
-def _matches_type(value: Any, expected: Any) -> bool:
-    if expected == "string":
-        return isinstance(value, str)
-    if expected == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if expected == "number":
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
-    if expected == "boolean":
-        return isinstance(value, bool)
-    return False

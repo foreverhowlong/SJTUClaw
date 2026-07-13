@@ -6,7 +6,6 @@ import json
 import os
 import re
 import shutil
-from copy import deepcopy
 from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -18,8 +17,10 @@ from uuid import uuid4
 from filelock import FileLock, Timeout
 
 from claw.errors import SessionConflictError, SessionError
-from claw.llm import Message
+from claw.messages import Message
 from claw.session import Session
+from claw.store.session_log import parse_datetime, read_message_log
+from claw.store.session_messages import validate_history, validate_turn
 
 
 SESSION_ID_PATTERN = re.compile(r"session_[0-9a-f]{12}")
@@ -33,14 +34,6 @@ class SessionSummary:
     message_count: int
     created_at: datetime
     updated_at: datetime
-
-
-@dataclass(frozen=True)
-class _MessageLog:
-    messages: tuple[Message, ...]
-    summary: str
-    revision: int
-    last_committed_at: datetime | None
 
 
 class SessionStore:
@@ -106,7 +99,7 @@ class SessionStore:
         expected_revision: int,
         messages: Sequence[Message],
     ) -> Session:
-        committed_messages = self._validate_turn(messages)
+        committed_messages = validate_turn(messages)
         with self._locked(session_id):
             snapshot = self._load_unlocked(session_id)
             if snapshot.revision != expected_revision:
@@ -149,7 +142,7 @@ class SessionStore:
         normalized_summary = summary.strip()
         if not normalized_summary:
             raise SessionError("session summary 不能为空。")
-        retained = self._validate_history(recent_messages)
+        retained = validate_history(recent_messages)
 
         with self._locked(session_id):
             snapshot = self._load_unlocked(session_id)
@@ -226,7 +219,7 @@ class SessionStore:
         meta_path = session_dir / "meta.json"
         messages_path = session_dir / "messages.jsonl"
         meta = self._read_meta(meta_path)
-        log = self._read_log(messages_path)
+        log = read_message_log(messages_path)
 
         if meta.get("sessionId") != session_id:
             raise SessionError(
@@ -236,8 +229,8 @@ class SessionStore:
         if not isinstance(title, str) or not title.strip():
             raise SessionError(f"Session 数据损坏: {meta_path} 中的 title 无效。")
 
-        created_at = self._parse_datetime(meta.get("createdAt"), meta_path, "createdAt")
-        metadata_updated_at = self._parse_datetime(
+        created_at = parse_datetime(meta.get("createdAt"), meta_path, "createdAt")
+        metadata_updated_at = parse_datetime(
             meta.get("updatedAt"),
             meta_path,
             "updatedAt",
@@ -254,230 +247,6 @@ class SessionStore:
             revision=log.revision,
             summary=log.summary,
             _messages=log.messages,
-        )
-
-    def _read_log(self, path: Path) -> _MessageLog:
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except FileNotFoundError as exc:
-            raise SessionError(f"Session 数据损坏: 缺少 {path}。") from exc
-        except (OSError, UnicodeError) as exc:
-            raise SessionError(f"读取 session 消息失败 {path}: {exc}") from exc
-
-        messages: list[Message] = []
-        summary = ""
-        revision = 0
-        last_committed_at: datetime | None = None
-        for line_number, line in enumerate(lines, start=1):
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise SessionError(
-                    f"Session 数据损坏: {path} 第 {line_number} 行不是有效 JSON。"
-                ) from exc
-
-            if self._is_message(record):
-                messages.append(self._copy_message(record))
-                revision += 1
-                continue
-
-            if not isinstance(record, dict) or record.get("type") not in {
-                "turn",
-                "compaction",
-            }:
-                raise SessionError(
-                    f"Session 数据损坏: {path} 第 {line_number} 行记录格式无效。"
-                )
-            expected_record_revision = revision + 1
-            if record.get("revision") != expected_record_revision:
-                raise SessionError(
-                    f"Session 数据损坏: {path} 第 {line_number} 行 revision 无效。"
-                )
-            if record["type"] == "turn":
-                turn_messages = record.get("messages")
-                if not isinstance(turn_messages, list):
-                    raise SessionError(
-                        f"Session 数据损坏: {path} 第 {line_number} 行 messages 无效。"
-                    )
-                try:
-                    validated = self._validate_turn(turn_messages)
-                except SessionError as exc:
-                    raise SessionError(
-                        f"Session 数据损坏: {path} 第 {line_number} 行: {exc}"
-                    ) from exc
-                committed_at = self._parse_datetime(
-                    record.get("committedAt"),
-                    path,
-                    f"第 {line_number} 行 committedAt",
-                )
-                messages.extend(validated)
-            else:
-                committed_at, summary, messages = self._read_compaction_record(
-                    record,
-                    current_messages=messages,
-                    path=path,
-                    line_number=line_number,
-                )
-            revision = expected_record_revision
-            last_committed_at = committed_at
-
-        return _MessageLog(tuple(messages), summary, revision, last_committed_at)
-
-    def _read_compaction_record(
-        self,
-        record: dict[str, Any],
-        *,
-        current_messages: list[Message],
-        path: Path,
-        line_number: int,
-    ) -> tuple[datetime, str, list[Message]]:
-        summary = record.get("summary")
-        recent_messages = record.get("recentMessages")
-        old_message_count = record.get("oldMessageCount")
-        recent_message_count = record.get("recentMessageCount")
-        if not isinstance(summary, str) or not summary.strip():
-            raise SessionError(
-                f"Session 数据损坏: {path} 第 {line_number} 行 summary 无效。"
-            )
-        if not isinstance(recent_messages, list):
-            raise SessionError(
-                f"Session 数据损坏: {path} 第 {line_number} 行 recentMessages 无效。"
-            )
-        try:
-            retained = self._validate_history(recent_messages)
-        except SessionError as exc:
-            raise SessionError(
-                f"Session 数据损坏: {path} 第 {line_number} 行: {exc}"
-            ) from exc
-        expected_old_count = len(current_messages) - len(retained)
-        if (
-            not isinstance(old_message_count, int)
-            or old_message_count <= 0
-            or old_message_count != expected_old_count
-            or recent_message_count != len(retained)
-            or current_messages[-len(retained) :] != retained
-        ):
-            raise SessionError(
-                f"Session 数据损坏: {path} 第 {line_number} 行 compaction 边界无效。"
-            )
-        compacted_at = self._parse_datetime(
-            record.get("compactedAt"),
-            path,
-            f"第 {line_number} 行 compactedAt",
-        )
-        return compacted_at, summary.strip(), retained
-
-    @staticmethod
-    def _validate_turn(messages: Sequence[Message]) -> list[Message]:
-        copied = [SessionStore._copy_message(message) for message in messages]
-        if len(copied) < 2:
-            raise SessionError("一个已完成 turn 至少包含 user 和 assistant 消息。")
-        if not SessionStore._is_text_message(copied[0], "user"):
-            raise SessionError("turn 必须以 user 文本消息开始。")
-        if not SessionStore._is_text_message(copied[-1], "assistant"):
-            raise SessionError("turn 必须以 assistant 最终文本消息结束。")
-
-        index = 1
-        while index < len(copied) - 1:
-            assistant = copied[index]
-            call_ids = SessionStore._tool_call_ids(assistant)
-            if not call_ids:
-                raise SessionError("turn 中间消息必须是 assistant tool call。")
-            if len(set(call_ids)) != len(call_ids):
-                raise SessionError("同一 assistant 消息中的 tool call id 必须唯一。")
-            results = copied[index + 1 : index + 1 + len(call_ids)]
-            if len(results) != len(call_ids):
-                raise SessionError("每个 tool call 都必须有对应 tool result。")
-            result_ids: list[str] = []
-            for result in results:
-                if not SessionStore._is_tool_result(result):
-                    raise SessionError("tool result 消息格式无效。")
-                result_ids.append(result["tool_call_id"])
-            if set(result_ids) != set(call_ids) or len(set(result_ids)) != len(result_ids):
-                raise SessionError("tool result 必须与本轮 tool call id 一一对应。")
-            index += 1 + len(call_ids)
-        return copied
-
-    @staticmethod
-    def _validate_history(messages: Sequence[Message]) -> list[Message]:
-        copied = [SessionStore._copy_message(message) for message in messages]
-        if not copied:
-            raise SessionError("recent messages 必须包含至少一个完整 turn。")
-        starts = [index for index, message in enumerate(copied) if message.get("role") == "user"]
-        if not starts or starts[0] != 0:
-            raise SessionError("recent messages 必须从完整 user turn 开始。")
-        for position, start in enumerate(starts):
-            end = starts[position + 1] if position + 1 < len(starts) else len(copied)
-            SessionStore._validate_turn(copied[start:end])
-        return copied
-
-    @staticmethod
-    def _is_message(value: Any) -> bool:
-        """Recognize the legacy one-message-per-line JSONL format."""
-        return (
-            isinstance(value, dict)
-            and value.get("role") in {"user", "assistant"}
-            and isinstance(value.get("content"), str)
-            and "tool_calls" not in value
-        )
-
-    @staticmethod
-    def _copy_message(value: Any) -> Message:
-        if not isinstance(value, dict) or not isinstance(value.get("role"), str):
-            raise SessionError("消息格式无效。")
-        try:
-            copied = deepcopy(value)
-            json.dumps(copied, ensure_ascii=False)
-        except (TypeError, ValueError) as exc:
-            raise SessionError(f"消息必须可 JSON 序列化: {exc}") from exc
-        return copied
-
-    @staticmethod
-    def _is_text_message(value: Message, role: str) -> bool:
-        return (
-            value.get("role") == role
-            and isinstance(value.get("content"), str)
-            and bool(value["content"].strip())
-            and "tool_calls" not in value
-        )
-
-    @staticmethod
-    def _tool_call_ids(value: Message) -> list[str]:
-        if value.get("role") != "assistant":
-            return []
-        content = value.get("content")
-        if content is not None and not isinstance(content, str):
-            return []
-        calls = value.get("tool_calls")
-        if not isinstance(calls, list) or not calls:
-            return []
-        call_ids: list[str] = []
-        for call in calls:
-            if not isinstance(call, dict) or call.get("type") != "function":
-                return []
-            call_id = call.get("id")
-            function = call.get("function")
-            if (
-                not isinstance(call_id, str)
-                or not call_id
-                or not isinstance(function, dict)
-                or not isinstance(function.get("name"), str)
-                or not function["name"]
-                or not isinstance(function.get("arguments"), str)
-            ):
-                return []
-            call_ids.append(call_id)
-        return call_ids
-
-    @staticmethod
-    def _is_tool_result(value: Message) -> bool:
-        return (
-            value.get("role") == "tool"
-            and isinstance(value.get("tool_call_id"), str)
-            and bool(value["tool_call_id"])
-            and isinstance(value.get("name"), str)
-            and bool(value["name"])
-            and isinstance(value.get("content"), str)
         )
 
     def _append_record(self, path: Path, record: dict[str, Any]) -> None:
@@ -563,18 +332,6 @@ class SessionStore:
         if not isinstance(value, dict):
             raise SessionError(f"Session 数据损坏: {path} 必须包含 JSON object。")
         return value
-
-    @staticmethod
-    def _parse_datetime(value: Any, path: Path, field: str) -> datetime:
-        if not isinstance(value, str):
-            raise SessionError(f"Session 数据损坏: {path} 中的 {field} 无效。")
-        try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError as exc:
-            raise SessionError(f"Session 数据损坏: {path} 中的 {field} 无效。") from exc
-        if parsed.tzinfo is None:
-            raise SessionError(f"Session 数据损坏: {path} 中的 {field} 缺少时区。")
-        return parsed
 
     @staticmethod
     def _serialize_meta(session: Session) -> str:

@@ -13,7 +13,8 @@ from claw.compaction import CompactionResult, Compactor, serialized_request_char
 from claw.context import ContextBuilder, TOOL_RESULT_PREVIEW_CHARS
 from claw.errors import LLMError, SessionError, ToolError
 from claw.events import AgentEvent
-from claw.llm import LLMStreamEvent, Message
+from claw.llm import LLMStreamEvent
+from claw.messages import Message
 from claw.session import Session
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
@@ -163,80 +164,15 @@ class AgentService:
                 raise LLMError("LLM stream 未返回 completed 事件。")
 
             if completion.tool_calls:
-                working.append(_assistant_tool_message(completion.content, completion.tool_calls))
-                oversized_batch = len(completion.tool_calls) > MAX_TOOL_CALLS_PER_BATCH
-                for call in completion.tool_calls:
-                    yield AgentEvent(
-                        "tool_call",
-                        session_id,
-                        {
-                            "callId": call.call_id,
-                            "name": call.name,
-                            "arguments": call.arguments,
-                        },
-                    )
-                    if oversized_batch:
-                        result = ToolResult(
-                            call.call_id,
-                            call.name,
-                            False,
-                            error=(
-                                f"一次最多请求 {MAX_TOOL_CALLS_PER_BATCH} 个 tool calls，"
-                                "本批未执行。"
-                            ),
-                        )
-                    else:
-                        tool = self._tools.get(call.name)
-                        approved = False
-                        if tool is not None and tool.requires_approval:
-                            yield AgentEvent(
-                                "approval_required",
-                                session_id,
-                                {"callId": call.call_id, "name": call.name},
-                            )
-                            decision = await self._approval_policy.authorize(
-                                session_id,
-                                tool,
-                                call,
-                            )
-                            approved = decision.approved
-                            yield AgentEvent(
-                                "approval_resolved",
-                                session_id,
-                                {
-                                    "callId": call.call_id,
-                                    "name": call.name,
-                                    "approved": decision.approved,
-                                    "reason": decision.reason,
-                                },
-                            )
-                            if not approved:
-                                result = ToolResult(
-                                    call.call_id,
-                                    call.name,
-                                    False,
-                                    error=decision.reason,
-                                )
-                            else:
-                                result = await self._tools.execute(
-                                    call,
-                                    approved=True,
-                                )
-                        else:
-                            result = await self._tools.execute(call)
-                    working.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": result.call_id,
-                            "name": result.name,
-                            "content": result.model_content(),
-                        }
-                    )
-                    yield AgentEvent(
-                        "tool_result",
-                        session_id,
-                        _tool_result_event_payload(result),
-                    )
+                working.append(
+                    _assistant_tool_message(completion.content, completion.tool_calls)
+                )
+                async for event in self._run_tool_batch(
+                    session_id,
+                    working,
+                    completion.tool_calls,
+                ):
+                    yield event
                 continue
 
             final = completion.content.strip()
@@ -250,6 +186,86 @@ class AgentService:
             )
             yield AgentEvent("llm_message", session_id, {"content": final})
             return
+
+    async def _run_tool_batch(
+        self,
+        session_id: str,
+        working: list[Message],
+        calls: tuple[ToolCall, ...],
+    ) -> AsyncIterator[AgentEvent]:
+        oversized = len(calls) > MAX_TOOL_CALLS_PER_BATCH
+        for call in calls:
+            async for event in self._run_tool_call(
+                session_id,
+                working,
+                call,
+                oversized=oversized,
+            ):
+                yield event
+
+    async def _run_tool_call(
+        self,
+        session_id: str,
+        working: list[Message],
+        call: ToolCall,
+        *,
+        oversized: bool,
+    ) -> AsyncIterator[AgentEvent]:
+        yield AgentEvent(
+            "tool_call",
+            session_id,
+            {
+                "callId": call.call_id,
+                "name": call.name,
+                "arguments": call.arguments,
+            },
+        )
+        if oversized:
+            result = _batch_limit_result(call)
+            working.append(_tool_result_message(result))
+            yield AgentEvent(
+                "tool_result",
+                session_id,
+                _tool_result_event_payload(result),
+            )
+            return
+
+        tool = self._tools.get(call.name)
+        if tool is None or not tool.requires_approval:
+            result = await self._tools.execute(call)
+        else:
+            yield AgentEvent(
+                "approval_required",
+                session_id,
+                {"callId": call.call_id, "name": call.name},
+            )
+            decision = await self._approval_policy.authorize(session_id, tool, call)
+            yield AgentEvent(
+                "approval_resolved",
+                session_id,
+                {
+                    "callId": call.call_id,
+                    "name": call.name,
+                    "approved": decision.approved,
+                    "reason": decision.reason,
+                },
+            )
+            if decision.approved:
+                result = await self._tools.execute(call, approved=True)
+            else:
+                result = ToolResult(
+                    call.call_id,
+                    call.name,
+                    False,
+                    error=decision.reason,
+                )
+
+        working.append(_tool_result_message(result))
+        yield AgentEvent(
+            "tool_result",
+            session_id,
+            _tool_result_event_payload(result),
+        )
 
     async def compact_session(
         self,
@@ -289,6 +305,27 @@ def _assistant_tool_message(
             for call in calls
         ],
     }
+
+
+def _tool_result_message(result: ToolResult) -> Message:
+    return {
+        "role": "tool",
+        "tool_call_id": result.call_id,
+        "name": result.name,
+        "content": result.model_content(),
+    }
+
+
+def _batch_limit_result(call: ToolCall) -> ToolResult:
+    return ToolResult(
+        call.call_id,
+        call.name,
+        False,
+        error=(
+            f"一次最多请求 {MAX_TOOL_CALLS_PER_BATCH} 个 tool calls，"
+            "本批未执行。"
+        ),
+    )
 
 
 def _tool_result_event_payload(result: ToolResult) -> dict:
