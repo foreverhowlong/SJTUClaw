@@ -20,7 +20,39 @@ export interface SessionDetail extends SessionSummary {
   revision: number;
   summary: string;
   messages: ConversationMessage[];
+  timeline: PersistedTimelineItem[];
 }
+
+export interface TextTimelineItem {
+  type: "user_message" | "assistant_message" | "working_note";
+  content: string;
+}
+
+export type ToolActivityStatus =
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "awaiting_approval";
+
+export interface ToolActivityItem {
+  type: "tool_activity";
+  callId: string;
+  toolName: string;
+  action: string;
+  target: string;
+  status: ToolActivityStatus;
+  detail: string;
+  error: string;
+}
+
+export interface RuntimeNoticeItem {
+  type: "runtime_notice";
+  level: "warning" | "error";
+  content: string;
+}
+
+export type PersistedTimelineItem = TextTimelineItem | ToolActivityItem;
+export type TimelineItem = PersistedTimelineItem | RuntimeNoticeItem;
 
 export interface AttachmentMetadata {
   attachmentId: string;
@@ -58,8 +90,6 @@ export type GatewayMessage =
 export interface SessionRunState {
   requestId: string | null;
   pendingUser: string | null;
-  intermediateAssistant: string[];
-  streamedAssistant: string;
+  liveTimeline: TimelineItem[];
   running: boolean;
-  events: AgentEvent[];
 }

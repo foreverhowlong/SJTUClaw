@@ -301,7 +301,7 @@ export default function App() {
               className="mobile-toggle"
               type="button"
               onClick={() => setRightOpen(true)}
-              aria-label="打开 Agent Activity"
+              aria-label="打开 Session Files"
             >
               ◫
             </button>
@@ -340,7 +340,6 @@ export default function App() {
           />
           <InspectorPanel
             className={rightOpen ? "is-open" : ""}
-            events={activeRun.events}
             attachments={activeAttachments}
             disabled={!activeSessionId}
             onUpload={handleUpload}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
+import json
 
 from starlette.testclient import TestClient
 
@@ -21,6 +22,36 @@ class FakeAgent:
         yield AgentEvent("turn_start", session_id, {"userInput": user_input})
         yield AgentEvent("llm_delta", session_id, {"delta": "你好"})
         yield AgentEvent("llm_message", session_id, {"content": "你好"})
+        yield AgentEvent("turn_end", session_id, {"status": "completed"})
+
+
+class FakeToolAgent(FakeAgent):
+    async def run_turn(self, session_id: str, user_input: str):
+        yield AgentEvent("turn_start", session_id, {"userInput": user_input})
+        yield AgentEvent(
+            "tool_call",
+            session_id,
+            {
+                "callId": "call_1",
+                "name": "read_file",
+                "arguments": '{"path":"README.md"}',
+            },
+        )
+        yield AgentEvent(
+            "tool_result",
+            session_id,
+            {
+                "callId": "call_1",
+                "name": "read_file",
+                "ok": True,
+                "result": {
+                    "path": "README.md",
+                    "charactersRead": 12,
+                    "truncated": False,
+                },
+                "error": "",
+            },
+        )
         yield AgentEvent("turn_end", session_id, {"status": "completed"})
 
 
@@ -56,6 +87,54 @@ def test_rest_sessions_share_the_runtime_store(tmp_path) -> None:
     assert created.status_code == 201
     assert created.json()["title"] == "Web session"
     assert detail.json()["messages"] == []
+    assert detail.json()["timeline"] == []
+
+
+def test_rest_session_detail_projects_persisted_tool_timeline(tmp_path) -> None:
+    runtime = make_runtime(tmp_path)
+    session = runtime.session_store.create()
+    runtime.session_store.commit_turn(
+        session.session_id,
+        expected_revision=0,
+        messages=[
+            {"role": "user", "content": "inspect"},
+            {
+                "role": "assistant",
+                "content": "I will inspect it.",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "list_dir",
+                            "arguments": '{"path":"."}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "name": "list_dir",
+                "content": json.dumps(
+                    {"ok": True, "result": [{"name": "README.md"}]}
+                ),
+            },
+            {"role": "assistant", "content": "Done."},
+        ],
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        detail = client.get(f"/api/sessions/{session.session_id}").json()
+
+    assert [item["type"] for item in detail["timeline"]] == [
+        "user_message",
+        "working_note",
+        "tool_activity",
+        "assistant_message",
+    ]
+    assert detail["timeline"][2]["status"] == "succeeded"
+    assert detail["timeline"][2]["detail"] == "1 项"
 
 
 def test_rest_renames_and_deletes_session_with_attachments(tmp_path) -> None:
@@ -130,6 +209,33 @@ def test_websocket_creates_missing_session_and_forwards_agent_events(tmp_path) -
         "turn_end",
     ]
     assert runtime.agent.calls == [(session_id, "hello")]
+
+
+def test_websocket_enriches_tool_events_with_shared_timeline_items(tmp_path) -> None:
+    runtime = make_runtime(tmp_path)
+    runtime.agent = FakeToolAgent()
+    session = runtime.session_store.create()
+
+    with TestClient(create_app(runtime)) as client:
+        with client.websocket_connect("/ws/chat") as socket:
+            socket.send_json(
+                {
+                    "type": "run_turn",
+                    "requestId": "tools",
+                    "sessionId": session.session_id,
+                    "message": "inspect",
+                }
+            )
+            socket.receive_json()
+            events = [socket.receive_json()["event"] for _ in range(4)]
+
+    call = events[1]["payload"]["timelineItem"]
+    result = events[2]["payload"]["timelineItem"]
+    assert call["action"] == "读取文件"
+    assert call["target"] == "README.md"
+    assert call["status"] == "running"
+    assert result["status"] == "succeeded"
+    assert result["detail"] == "12 字符"
 
 
 def test_websocket_rejects_unknown_session_but_stays_connected(tmp_path) -> None:

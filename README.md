@@ -40,12 +40,13 @@ bye.
 ```
 
 Assistant text is streamed as it arrives. Tool calls are assembled and validated
-by the runtime before execution, then rendered as a trace:
+by the runtime before execution, then rendered as compact activities rather than
+raw arguments and results:
 
 ```text
 User> 读取 README.md 并总结项目内容。
-[tool_call] read_file {"path":"README.md"}
-[tool_result] read_file {"path":".../README.md","content":"...","truncated":false}
+Tool> 读取文件 · README.md [RUNNING]
+Tool> 读取文件 · README.md [DONE] · 2,148 字符
 Assistant> README.md describes a minimal agent runtime...
 ```
 
@@ -75,11 +76,12 @@ cd web && npm run dev
 
 Vite proxies `/api` and `/ws` to the local Gateway. The interface is a
 three-column agent command center: shared sessions on the left, persisted chat
-history in the middle, and structured runtime activity plus session attachments
-on the right. Sessions can be renamed or deleted from the left rail, assistant
-messages render safe GitHub-flavored Markdown, and text emitted before a tool
-call remains visible as a working note. On smaller screens the side panels
-become drawers.
+history in the middle, and session attachments on the right. Sessions can be
+renamed or deleted from the left rail. Assistant messages render safe
+GitHub-flavored Markdown and KaTeX, while tool activities appear inline between
+working notes and final answers. Transport-only events such as turn boundaries
+and response deltas are not shown. On smaller screens the side panels become
+drawers.
 
 The REST surface is intentionally small:
 
@@ -93,8 +95,11 @@ The REST surface is intentionally small:
 `/ws/chat` accepts `run_turn` frames with `requestId`, optional `sessionId`, and
 `message`. A missing session ID creates a new session; an unknown ID returns a
 structured error. The Gateway first emits `session_resolved`, then wraps each
-existing `AgentEvent` as `agent_event`. Transport failures use `gateway_error`.
-One failed request does not terminate the connection or server.
+existing `AgentEvent` as `agent_event`. Tool events also carry the shared,
+interface-neutral timeline projection used by Web and CLI. Session detail
+responses include both the provider-neutral messages and this derived timeline.
+Transport failures use `gateway_error`. One failed request does not terminate
+the connection or server.
 
 Web requests for the same session are serialized inside the Gateway. Concurrent
 CLI updates remain protected by the SessionStore revision check.

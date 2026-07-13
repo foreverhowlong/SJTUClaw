@@ -195,7 +195,7 @@ export function SessionRail({
                     )
                   }
                 >
-                  •••
+                  <span aria-hidden="true">⋯</span>
                 </button>
                 {menuSessionId === session.sessionId && (
                   <div className="session-menu" role="menu">

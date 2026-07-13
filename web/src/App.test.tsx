@@ -50,6 +50,7 @@ function makeSession(sessionId: string, title: string): SessionDetail {
     revision: 0,
     summary: "",
     messages: [],
+    timeline: [],
   };
 }
 
@@ -74,6 +75,8 @@ describe("App session deletion", () => {
 
     render(<App />);
     await screen.findByRole("heading", { name: "Only session" });
+    expect(screen.queryByText("ACTIVITY")).toBeNull();
+    expect(screen.getByText("SESSION FILES")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Only session 的操作" }));
     await user.click(screen.getByRole("menuitem", { name: "DELETE" }));
     await user.click(screen.getByRole("button", { name: "DELETE SESSION" }));

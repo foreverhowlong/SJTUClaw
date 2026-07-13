@@ -101,6 +101,17 @@ def test_repl_renders_tool_trace_and_error_event(tmp_path) -> None:
                 "reason": "未配置",
             },
         ),
+        AgentEvent(
+            "tool_result",
+            session.session_id,
+            {
+                "callId": "2",
+                "name": "write_file",
+                "ok": False,
+                "result": None,
+                "error": "未配置",
+            },
+        ),
         AgentEvent("error", session.session_id, {"message": "stream failed"}),
         AgentEvent("turn_end", session.session_id, {"status": "failed"}),
     ]
@@ -116,10 +127,10 @@ def test_repl_renders_tool_trace_and_error_event(tmp_path) -> None:
         stderr=stderr,
     )
 
-    assert '[tool_call] list_dir {"path":"."}' in stdout.getvalue()
-    assert '[tool_result] list_dir ["README.md"]' in stdout.getvalue()
-    assert "[approval_required] write_file" in stdout.getvalue()
-    assert "[approval_resolved] write_file denied: 未配置" in stdout.getvalue()
+    assert "Tool> 查看目录 · . [RUNNING]" in stdout.getvalue()
+    assert "Tool> 查看目录 · . [DONE] · 1 项" in stdout.getvalue()
+    assert "Tool> 运行工具 write_file [APPROVAL REQUIRED]" in stdout.getvalue()
+    assert "Tool> 运行工具 write_file [FAILED] · 未配置" in stdout.getvalue()
     assert "错误: stream failed" in stderr.getvalue()
 
 
@@ -160,6 +171,58 @@ def test_session_commands_only_change_cli_current_session(tmp_path) -> None:
     assert agent.calls == []
     assert sessions.load(first.session_id).title == "Course Project"
     assert f"Switched to session: {first.session_id}" in stdout.getvalue()
+
+
+def test_session_history_reuses_timeline_and_keeps_tool_prelude(tmp_path) -> None:
+    sessions, memories = stores(tmp_path)
+    history = sessions.create("History")
+    sessions.commit_turn(
+        history.session_id,
+        expected_revision=0,
+        messages=[
+            {"role": "user", "content": "inspect"},
+            {
+                "role": "assistant",
+                "content": "I will inspect README.",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"path":"README.md"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "name": "read_file",
+                "content": (
+                    '{"ok":true,"result":{"path":"README.md",'
+                    '"charactersRead":12,"truncated":false}}'
+                ),
+            },
+            {"role": "assistant", "content": "Done."},
+        ],
+    )
+    current = sessions.create("Current")
+    stdout = StringIO()
+
+    run(
+        FakeAgent([]),
+        sessions,
+        memories,
+        initial_session_id=current.session_id,
+        input_fn=input_from([f"/session switch {history.session_id}", "/exit"]),
+        stdout=stdout,
+    )
+
+    rendered = stdout.getvalue()
+    assert "Assistant [working]> I will inspect README." in rendered
+    assert "Tool> 读取文件 · README.md [DONE] · 12 字符" in rendered
+    assert "Assistant> Done." in rendered
 
 
 def test_memory_commands_do_not_call_agent(tmp_path) -> None:

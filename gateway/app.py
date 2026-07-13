@@ -18,6 +18,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
 from claw.errors import AttachmentError, ClawError, SessionError
+from claw.events import AgentEvent
+from claw.presentation.timeline import build_conversation_timeline, tool_activity
 from claw.runtime import ClawRuntime, build_runtime
 from claw.session import Session
 from claw.store.sessions import SessionSummary
@@ -60,7 +62,7 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=_cors_origins(),
         allow_credentials=False,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Content-Type"],
     )
 
@@ -173,6 +175,7 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
                     }
                 )
                 async with _session_lock(websocket.app, session_id):
+                    live_tools: dict[str, tuple[str, str]] = {}
                     async for event in active_runtime.agent.run_turn(
                         session_id,
                         message,
@@ -181,7 +184,7 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
                             {
                                 "type": "agent_event",
                                 "requestId": request_id,
-                                "event": event.to_dict(),
+                                "event": _web_event(event, live_tools),
                             }
                         )
             except WebSocketDisconnect:
@@ -238,7 +241,58 @@ def _session_detail(session: Session) -> dict[str, Any]:
         "revision": session.revision,
         "summary": session.summary,
         "messages": session.messages,
+        "timeline": build_conversation_timeline(session.messages),
     }
+
+
+def _web_event(
+    event: AgentEvent,
+    live_tools: dict[str, tuple[str, str]],
+) -> dict[str, Any]:
+    """Attach shared presentation data while retaining the runtime event contract."""
+    rendered = event.to_dict()
+    payload = dict(rendered["payload"])
+    rendered["payload"] = payload
+    if event.type == "tool_call":
+        call_id = str(payload["callId"])
+        name = str(payload["name"])
+        arguments = str(payload["arguments"])
+        live_tools[call_id] = (name, arguments)
+        payload["timelineItem"] = tool_activity(call_id, name, arguments)
+    elif event.type == "tool_result":
+        call_id = str(payload["callId"])
+        name, arguments = live_tools.get(
+            call_id,
+            (str(payload["name"]), "{}"),
+        )
+        payload["timelineItem"] = tool_activity(
+            call_id,
+            name,
+            arguments,
+            status="succeeded" if payload["ok"] else "failed",
+            result=payload.get("result"),
+            error=str(payload.get("error", "")),
+        )
+    elif event.type in {"approval_required", "approval_resolved"}:
+        call_id = str(payload["callId"])
+        name, arguments = live_tools.get(
+            call_id,
+            (str(payload["name"]), "{}"),
+        )
+        if event.type == "approval_required":
+            status = "awaiting_approval"
+            error = ""
+        else:
+            status = "running" if payload["approved"] else "failed"
+            error = "" if payload["approved"] else str(payload["reason"])
+        payload["timelineItem"] = tool_activity(
+            call_id,
+            name,
+            arguments,
+            status=status,
+            error=error,
+        )
+    return rendered
 
 
 def _parse_turn_request(

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Protocol, TextIO
@@ -31,6 +30,11 @@ from claw.cli_commands import (
 from claw.compaction import CompactionResult
 from claw.errors import ClawError, CommandParseError
 from claw.events import AgentEvent
+from claw.presentation.timeline import (
+    ToolActivityItem,
+    build_conversation_timeline,
+    tool_activity,
+)
 from claw.runtime import build_runtime
 from claw.session import Session
 from claw.store.memory import MemoryStore
@@ -177,24 +181,15 @@ def _print_history(session: Session, output: TextIO) -> None:
     if not session.messages:
         print("(empty)", file=output)
         return
-    for message in session.messages:
-        role = message["role"]
-        if role == "user":
-            print(f"User> {message['content']}", file=output)
-        elif role == "tool":
-            print(
-                f"[tool_result] {message.get('name', '')} {message['content']}",
-                file=output,
-            )
-        elif message.get("tool_calls"):
-            for call in message["tool_calls"]:
-                function = call["function"]
-                print(
-                    f"[tool_call] {function['name']} {function['arguments']}",
-                    file=output,
-                )
+    for item in build_conversation_timeline(session.messages):
+        if item["type"] == "user_message":
+            print(f"User> {item['content']}", file=output)
+        elif item["type"] == "working_note":
+            print(f"Assistant [working]> {item['content']}", file=output)
+        elif item["type"] == "assistant_message":
+            print(f"Assistant> {item['content']}", file=output)
         else:
-            print(f"Assistant> {message['content']}", file=output)
+            print(_format_tool_activity(item), file=output)
 
 
 def _print_memories(store: MemoryStore, output: TextIO) -> None:
@@ -236,6 +231,7 @@ async def _render_turn(
     error_output: TextIO,
 ) -> None:
     streaming = False
+    tool_calls: dict[str, tuple[str, str]] = {}
     async for event in events:
         if event.type == "llm_delta":
             if not streaming:
@@ -246,41 +242,53 @@ async def _render_turn(
             if streaming:
                 print(file=output)
                 streaming = False
+            call_id = str(event.payload["callId"])
+            name = str(event.payload["name"])
+            arguments = str(event.payload["arguments"])
+            tool_calls[call_id] = (name, arguments)
             print(
-                f"[tool_call] {event.payload['name']} "
-                f"{event.payload['arguments']}",
+                _format_tool_activity(tool_activity(call_id, name, arguments)),
                 file=output,
             )
         elif event.type == "tool_result":
-            if event.payload.get("truncated"):
-                detail = {
-                    "truncated": True,
-                    "originalCharacters": event.payload["originalCharacters"],
-                    "preview": event.payload["preview"],
-                }
-            else:
-                detail = (
-                    event.payload["result"]
-                    if event.payload["ok"]
-                    else {"error": event.payload["error"]}
-                )
+            call_id = str(event.payload["callId"])
+            name, arguments = tool_calls.get(
+                call_id,
+                (str(event.payload["name"]), "{}"),
+            )
             print(
-                f"[tool_result] {event.payload['name']} "
-                f"{json.dumps(detail, ensure_ascii=False)}",
+                _format_tool_activity(
+                    tool_activity(
+                        call_id,
+                        name,
+                        arguments,
+                        status="succeeded" if event.payload["ok"] else "failed",
+                        result=event.payload.get("result"),
+                        error=str(event.payload.get("error", "")),
+                    )
+                ),
                 file=output,
             )
         elif event.type == "approval_required":
+            call_id = str(event.payload["callId"])
+            name, arguments = tool_calls.get(
+                call_id,
+                (str(event.payload["name"]), "{}"),
+            )
             print(
-                f"[approval_required] {event.payload['name']}",
+                _format_tool_activity(
+                    tool_activity(
+                        call_id,
+                        name,
+                        arguments,
+                        status="awaiting_approval",
+                    )
+                ),
                 file=output,
             )
         elif event.type == "approval_resolved":
-            status = "approved" if event.payload["approved"] else "denied"
-            print(
-                f"[approval_resolved] {event.payload['name']} {status}: "
-                f"{event.payload['reason']}",
-                file=output,
-            )
+            # The following tool_result is the durable, user-relevant outcome.
+            continue
         elif event.type == "llm_message":
             if streaming:
                 print(file=output)
@@ -300,6 +308,27 @@ async def _render_turn(
                 print("\n[stream interrupted]", file=output)
                 streaming = False
             print(f"错误: {event.payload['message']}", file=error_output)
+
+    if streaming:
+        print(file=output)
+
+
+def _format_tool_activity(item: ToolActivityItem) -> str:
+    target = f" · {item['target']}" if item["target"] else ""
+    if item["status"] == "succeeded":
+        status = "DONE"
+        note = item["detail"]
+    elif item["status"] == "failed":
+        status = "FAILED"
+        note = item["error"]
+    elif item["status"] == "awaiting_approval":
+        status = "APPROVAL REQUIRED"
+        note = ""
+    else:
+        status = "RUNNING"
+        note = ""
+    suffix = f" · {note}" if note else ""
+    return f"Tool> {item['action']}{target} [{status}]{suffix}"
 
 
 def main(argv: list[str] | None = None) -> int:

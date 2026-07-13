@@ -4,7 +4,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { EMPTY_RUN } from "../state";
-import type { SessionDetail } from "../types";
+import type { PersistedTimelineItem, SessionDetail } from "../types";
 import { ConversationPane } from "./ConversationPane";
 
 beforeAll(() => {
@@ -13,29 +13,41 @@ beforeAll(() => {
 
 afterEach(cleanup);
 
-function detail(messages: SessionDetail["messages"]): SessionDetail {
+function detail(timeline: PersistedTimelineItem[]): SessionDetail {
   return {
     sessionId: "session_0123456789ab",
     title: "Markdown session",
-    messageCount: messages.length,
+    messageCount: timeline.length,
     createdAt: "2026-07-13T00:00:00Z",
     updatedAt: "2026-07-13T00:00:00Z",
     revision: 1,
     summary: "",
-    messages,
+    messages: [],
+    timeline,
   };
 }
 
+const completedTool: PersistedTimelineItem = {
+  type: "tool_activity",
+  callId: "call_1",
+  toolName: "read_attachment",
+  action: "读取附件",
+  target: "task6.MD",
+  status: "succeeded",
+  detail: "1,024 字符",
+  error: "",
+};
+
 describe("ConversationPane", () => {
-  it("renders assistant GFM safely while keeping user text literal", () => {
+  it("renders safe GFM and LaTeX for assistant content only", () => {
     render(
       <ConversationPane
         detail={detail([
-          { role: "user", content: "**literal user**" },
+          { type: "user_message", content: "**literal** and $x^2$" },
           {
-            role: "assistant",
+            type: "assistant_message",
             content:
-              "## Result\n\n- one\n- two\n\n~~old~~\n\n<script>unsafe()</script>\n\n[docs](https://example.com)",
+              "## Result\n\n- one\n- two\n\nInline $E=mc^2$.\n\n$$x^2+y^2=z^2$$\n\n<script>unsafe()</script>\n\n[docs](https://example.com)",
           },
         ])}
         run={EMPTY_RUN}
@@ -45,30 +57,36 @@ describe("ConversationPane", () => {
       />,
     );
 
-    expect(screen.getByText("**literal user**")).toBeTruthy();
+    expect(screen.getByText("**literal** and $x^2$")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Result" })).toBeTruthy();
-    expect(screen.getByText("old").tagName).toBe("DEL");
+    expect(document.querySelectorAll(".katex").length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByText("unsafe()", { exact: false })).toBeNull();
     const link = screen.getByRole("link", { name: "docs" });
     expect(link.getAttribute("target")).toBe("_blank");
     expect(link.getAttribute("rel")).toContain("noopener");
   });
 
-  it("shows persisted and live tool preludes as working notes", () => {
+  it("renders persisted and live tools between working notes and replies", () => {
     render(
       <ConversationPane
         detail={detail([
-          { role: "user", content: "inspect" },
-          {
-            role: "assistant",
-            content: "I will inspect **README**.",
-            tool_calls: [{}],
-          },
-          { role: "assistant", content: "Final answer." },
+          { type: "user_message", content: "inspect" },
+          { type: "working_note", content: "I will inspect **README**." },
+          completedTool,
+          { type: "assistant_message", content: "Final answer." },
         ])}
         run={{
           ...EMPTY_RUN,
-          intermediateAssistant: ["Now checking `task6.MD`."],
+          liveTimeline: [
+            { type: "working_note", content: "Now checking `DESIGN.md`." },
+            {
+              ...completedTool,
+              callId: "call_2",
+              target: "DESIGN.md",
+              status: "running",
+              detail: "",
+            },
+          ],
           running: true,
         }}
         connection="connected"
@@ -79,7 +97,14 @@ describe("ConversationPane", () => {
 
     expect(screen.getAllByText("CLAW / WORKING NOTE")).toHaveLength(2);
     expect(screen.getByText("README").tagName).toBe("STRONG");
-    expect(screen.getByText("task6.MD").tagName).toBe("CODE");
+    expect(
+      screen.getAllByText("DESIGN.md").some((element) => element.tagName === "CODE"),
+    ).toBe(true);
+    expect(screen.getByLabelText("读取附件 DONE")).toBeTruthy();
+    expect(screen.getByLabelText("读取附件 RUNNING")).toBeTruthy();
+    expect(screen.getByText(/1,024 字符/)).toBeTruthy();
     expect(screen.getByText("Final answer.")).toBeTruthy();
+    expect(screen.queryByText("TURN STARTED")).toBeNull();
+    expect(screen.queryByText("RESPONSE STREAM")).toBeNull();
   });
 });

@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from "react";
+import rehypeKatex from "rehype-katex";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 
 import type {
   ConnectionState,
-  ConversationMessage,
   SessionDetail,
   SessionRunState,
+  TimelineItem,
 } from "../types";
+import { ToolActivity } from "./ToolActivity";
 
 interface Props {
   detail?: SessionDetail;
@@ -26,11 +29,17 @@ export function ConversationPane({
 }: Props) {
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
-  const messages = visibleMessages(detail?.messages ?? []);
+  const timeline = detail?.timeline ?? [];
+  const lastLiveItem = run.liveTimeline.at(-1);
+  const hasRunningTool = run.liveTimeline.some(
+    (item) =>
+      item.type === "tool_activity" &&
+      (item.status === "running" || item.status === "awaiting_approval"),
+  );
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
-  }, [messages.length, run.pendingUser, run.streamedAssistant]);
+  }, [timeline.length, run.pendingUser, run.liveTimeline]);
 
   const submit = () => {
     const content = draft.trim();
@@ -53,49 +62,39 @@ export function ConversationPane({
 
       <div className="message-scroll" aria-live="polite">
         {loading && <p className="muted-copy">正在恢复对话历史…</p>}
-        {!loading && messages.length === 0 && !run.pendingUser && (
+        {!loading && timeline.length === 0 && !run.pendingUser && (
           <div className="conversation-empty">
             <span className="micro-label">CLAW / READY</span>
             <h2>What should we<br />work through?</h2>
-            <p>
-              从一个问题开始。Claw 会沿用当前 session 的 context、memory、
-              compaction 与只读工具。
-            </p>
           </div>
         )}
-        {messages.map((message, index) => (
-          <MessageBubble
-            key={`${message.role}-${index}`}
-            message={message}
-            workingNote={
-              message.role === "assistant" && Boolean(message.tool_calls?.length)
-            }
+        {timeline.map((item, index) => (
+          <TimelineEntry
+            key={timelineKey(item, index, "persisted")}
+            item={item}
           />
         ))}
         {run.pendingUser && (
-          <MessageBubble
-            message={{ role: "user", content: run.pendingUser }}
-            pending
-          />
+          <MessageBubble content={run.pendingUser} user pending />
         )}
-        {run.intermediateAssistant.map((content, index) => (
-          <MessageBubble
-            key={`working-note-${index}`}
-            message={{ role: "assistant", content }}
-            workingNote
+        {run.liveTimeline.map((item, index) => (
+          <TimelineEntry
+            key={timelineKey(item, index, "live")}
+            item={item}
+            streaming={
+              run.running &&
+              index === run.liveTimeline.length - 1 &&
+              item.type === "assistant_message"
+            }
           />
         ))}
-        {run.streamedAssistant && (
-          <MessageBubble
-            message={{ role: "assistant", content: run.streamedAssistant }}
-            streaming={run.running}
-          />
-        )}
-        {run.running && !run.streamedAssistant && (
-          <div className="agent-waiting" aria-label="Agent 正在处理">
-            <span /> <span /> <span />
-          </div>
-        )}
+        {run.running &&
+          lastLiveItem?.type !== "assistant_message" &&
+          !hasRunningTool && (
+            <div className="agent-waiting" aria-label="Agent 正在处理">
+              <span /> <span /> <span />
+            </div>
+          )}
         <div ref={endRef} />
       </div>
 
@@ -138,27 +137,55 @@ export function ConversationPane({
   );
 }
 
-function visibleMessages(messages: ConversationMessage[]) {
-  return messages.filter(
-    (message) =>
-      (message.role === "user" || message.role === "assistant") &&
-      typeof message.content === "string" &&
-      message.content.trim(),
+function TimelineEntry({
+  item,
+  streaming = false,
+}: {
+  item: TimelineItem;
+  streaming?: boolean;
+}) {
+  if (item.type === "tool_activity") return <ToolActivity item={item} />;
+  if (item.type === "runtime_notice") {
+    return (
+      <article className={`runtime-notice runtime-notice-${item.level}`}>
+        <span className="micro-label">RUNTIME / {item.level}</span>
+        <p>{item.content}</p>
+      </article>
+    );
+  }
+  return (
+    <MessageBubble
+      content={item.content}
+      user={item.type === "user_message"}
+      workingNote={item.type === "working_note"}
+      streaming={streaming}
+    />
   );
 }
 
+function timelineKey(
+  item: TimelineItem,
+  index: number,
+  scope: "persisted" | "live",
+): string {
+  return item.type === "tool_activity"
+    ? `${scope}-tool-${item.callId}`
+    : `${scope}-${item.type}-${index}`;
+}
+
 function MessageBubble({
-  message,
+  content,
+  user = false,
   pending = false,
   streaming = false,
   workingNote = false,
 }: {
-  message: ConversationMessage;
+  content: string;
+  user?: boolean;
   pending?: boolean;
   streaming?: boolean;
   workingNote?: boolean;
 }) {
-  const user = message.role === "user";
   return (
     <article className={`message-row ${user ? "message-user" : "message-agent"}`}>
       <div className="message-label">
@@ -169,10 +196,16 @@ function MessageBubble({
       </div>
       <div className="message-content">
         {user ? (
-          message.content
+          content
         ) : (
           <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
+            remarkPlugins={[remarkGfm, remarkMath]}
+            rehypePlugins={[
+              [
+                rehypeKatex,
+                { throwOnError: false, trust: false, strict: false },
+              ],
+            ]}
             skipHtml
             components={{
               a: ({ children, ...props }) => (
@@ -182,7 +215,7 @@ function MessageBubble({
               ),
             }}
           >
-            {message.content ?? ""}
+            {content}
           </ReactMarkdown>
         )}
         {streaming && <span className="stream-caret" aria-hidden="true" />}
