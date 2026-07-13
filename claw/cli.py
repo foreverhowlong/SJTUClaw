@@ -8,10 +8,11 @@ from typing import Protocol, TextIO
 
 from prompt_toolkit import PromptSession
 
-from claw.agent import AgentService
+from claw.agent import AgentService, TurnResult
 from claw.cli_commands import (
     HELP_TEXT,
     ChatInput,
+    CompactCommand,
     ExitCommand,
     HelpCommand,
     MemoryAdd,
@@ -24,6 +25,7 @@ from claw.cli_commands import (
     SessionSwitch,
     parse_cli_input,
 )
+from claw.compaction import CompactionResult, Compactor, load_compaction_prompt
 from claw.config import load_llm_config
 from claw.context import ContextBuilder
 from claw.errors import ClawError, CommandParseError
@@ -38,7 +40,14 @@ _prompt_session: PromptSession[str] | None = None
 
 
 class AgentRuntime(Protocol):
-    def run_turn(self, session_id: str, user_input: str) -> str: ...
+    def run_turn(self, session_id: str, user_input: str) -> TurnResult: ...
+
+    def compact_session(
+        self,
+        session_id: str,
+        *,
+        force: bool = True,
+    ) -> CompactionResult: ...
 
 
 def run_repl(
@@ -85,8 +94,13 @@ def run_repl(
 
         try:
             if isinstance(parsed, ChatInput):
-                reply = agent.run_turn(current_session_id, parsed.content)
-                print(f"Assistant> {reply}", file=output)
+                result = agent.run_turn(current_session_id, parsed.content)
+                if result.compaction is not None:
+                    _print_compaction(result.compaction, output, error_output)
+                print(f"Assistant> {result.reply}", file=output)
+            elif isinstance(parsed, CompactCommand):
+                result = agent.compact_session(current_session_id, force=True)
+                _print_compaction(result, output, error_output)
             elif isinstance(parsed, SessionNew):
                 session = session_store.create()
                 current_session_id = session.session_id
@@ -152,6 +166,9 @@ def _print_sessions(store: SessionStore, current_session_id: str, output: TextIO
 
 
 def _print_history(session: Session, output: TextIO) -> None:
+    if session.summary:
+        print("Summary:", file=output)
+        print(session.summary, file=output)
     print("History:", file=output)
     if not session.messages:
         print("(empty)", file=output)
@@ -170,6 +187,27 @@ def _print_memories(store: MemoryStore, output: TextIO) -> None:
         print(f"{memory.memory_id}  {memory.content}", file=output)
 
 
+def _print_compaction(
+    result: CompactionResult,
+    output: TextIO,
+    error_output: TextIO,
+) -> None:
+    if result.status == "failed":
+        print(f"[system] compaction failed: {result.detail}", file=error_output)
+        return
+    if result.status == "skipped":
+        print(f"[system] compaction skipped: {result.detail}", file=output)
+        return
+    print(
+        f"[system] compact session {result.session_id}: "
+        f"old_messages={result.old_message_count}, "
+        f"recent_messages={result.recent_message_count}",
+        file=output,
+    )
+    print("[system] summary:", file=output)
+    print(result.summary, file=output)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args:
@@ -181,14 +219,21 @@ def main(argv: list[str] | None = None) -> int:
         config = load_llm_config(paths.env_file)
         session_store = SessionStore(paths.sessions_dir)
         memory_store = MemoryStore(paths.memory_dir)
+        llm = LLMClient(config)
+        compactor = Compactor(
+            llm,
+            session_store,
+            load_compaction_prompt(),
+        )
         agent = AgentService(
-            LLMClient(config),
+            llm,
             session_store,
             ContextBuilder.from_files(
                 paths.system_prompt_file,
                 paths.soul_file,
             ),
             memory_store,
+            compactor,
         )
         return run_repl(agent, session_store, memory_store)
     except KeyboardInterrupt:

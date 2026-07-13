@@ -1,6 +1,7 @@
 import pytest
 
 from claw.agent import AgentService
+from claw.compaction import CompactionPolicy, Compactor
 from claw.context import ContextBuilder
 from claw.errors import LLMError, SessionError
 from claw.llm import Message
@@ -41,8 +42,8 @@ def test_agent_runs_turn_for_explicit_session_and_sends_complete_history(tmp_pat
     agent, llm, store, _ = make_runtime(tmp_path, ["你好，小明。", "你叫小明。"])
     session_id = store.create().session_id
 
-    assert agent.run_turn(session_id, "你好，我叫小明。") == "你好，小明。"
-    assert agent.run_turn(session_id, "我叫什么？") == "你叫小明。"
+    assert agent.run_turn(session_id, "你好，我叫小明。").reply == "你好，小明。"
+    assert agent.run_turn(session_id, "我叫什么？").reply == "你叫小明。"
 
     assert llm.calls == [
         [
@@ -123,3 +124,130 @@ def test_sessions_are_isolated_and_memory_is_shared(tmp_path) -> None:
     assert store.load(second_id).messages[0]["content"] == "second"
     for call in llm.calls:
         assert f"[{memory.memory_id}]\n用户正在实现 claw 项目。" in call[0]["content"]
+
+
+def test_agent_compacts_before_building_normal_turn_context(tmp_path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    memories = MemoryStore(tmp_path / "memory")
+    session = store.create()
+    first = store.commit_turn(
+        session.session_id,
+        expected_revision=0,
+        messages=[
+            {"role": "user", "content": "old request"},
+            {"role": "assistant", "content": "old answer"},
+        ],
+    )
+    store.commit_turn(
+        session.session_id,
+        expected_revision=first.revision,
+        messages=[
+            {"role": "user", "content": "recent request"},
+            {"role": "assistant", "content": "recent answer"},
+        ],
+    )
+    llm = FakeLLM(["当前任务：继续近期工作。", "new answer"])
+    compactor = Compactor(
+        llm,
+        store,
+        "compact only session history",
+        CompactionPolicy(max_messages=3, recent_messages=2),
+    )
+    agent = AgentService(
+        llm,
+        store,
+        ContextBuilder("rules", "style"),
+        memories,
+        compactor,
+    )
+
+    result = agent.run_turn(session.session_id, "new request")
+
+    assert result.reply == "new answer"
+    assert result.compaction is not None and result.compaction.compacted
+    assert "old request" in llm.calls[0][1]["content"]
+    assert "old request" not in str(llm.calls[1])
+    assert "[Session Summary]\n当前任务：继续近期工作。" in llm.calls[1][0]["content"]
+    assert llm.calls[1][1:] == [
+        {"role": "user", "content": "recent request"},
+        {"role": "assistant", "content": "recent answer"},
+        {"role": "user", "content": "new request"},
+    ]
+
+
+def test_failed_auto_compaction_keeps_full_history_and_turn_can_continue(tmp_path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    memories = MemoryStore(tmp_path / "memory")
+    session = store.create()
+    for index in range(2):
+        snapshot = store.load(session.session_id)
+        store.commit_turn(
+            session.session_id,
+            expected_revision=snapshot.revision,
+            messages=[
+                {"role": "user", "content": f"question {index}"},
+                {"role": "assistant", "content": f"answer {index}"},
+            ],
+        )
+    llm = FakeLLM([LLMError("summary unavailable"), "normal reply"])
+    compactor = Compactor(
+        llm,
+        store,
+        "compact prompt",
+        CompactionPolicy(max_messages=3, recent_messages=2),
+    )
+    agent = AgentService(
+        llm,
+        store,
+        ContextBuilder("rules", "style"),
+        memories,
+        compactor,
+    )
+
+    result = agent.run_turn(session.session_id, "continue")
+
+    assert result.reply == "normal reply"
+    assert result.compaction is not None
+    assert result.compaction.status == "failed"
+    assert "question 0" in str(llm.calls[1])
+    assert store.load(session.session_id).message_count == 6
+
+
+def test_normal_llm_failure_after_compaction_adds_no_empty_turn(tmp_path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    memories = MemoryStore(tmp_path / "memory")
+    session = store.create()
+    for index in range(2):
+        snapshot = store.load(session.session_id)
+        store.commit_turn(
+            session.session_id,
+            expected_revision=snapshot.revision,
+            messages=[
+                {"role": "user", "content": f"question {index}"},
+                {"role": "assistant", "content": f"answer {index}"},
+            ],
+        )
+    llm = FakeLLM(["safe summary", LLMError("normal call failed")])
+    compactor = Compactor(
+        llm,
+        store,
+        "compact prompt",
+        CompactionPolicy(max_messages=3, recent_messages=2),
+    )
+    agent = AgentService(
+        llm,
+        store,
+        ContextBuilder("rules", "style"),
+        memories,
+        compactor,
+    )
+
+    with pytest.raises(LLMError, match="normal call failed"):
+        agent.run_turn(session.session_id, "must not persist")
+
+    restored = store.load(session.session_id)
+    assert restored.summary == "safe summary"
+    assert restored.messages == [
+        {"role": "user", "content": "question 1"},
+        {"role": "assistant", "content": "answer 1"},
+    ]

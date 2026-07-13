@@ -25,6 +25,11 @@ class HelpCommand:
 
 
 @dataclass(frozen=True)
+class CompactCommand:
+    pass
+
+
+@dataclass(frozen=True)
 class SessionNew:
     pass
 
@@ -69,6 +74,7 @@ CliInput: TypeAlias = (
     ChatInput
     | ExitCommand
     | HelpCommand
+    | CompactCommand
     | SessionNew
     | SessionList
     | SessionSwitch
@@ -83,6 +89,7 @@ CliInput: TypeAlias = (
 HELP_TEXT = """Commands:
   /exit
   /help
+  /compact
   /session new
   /session list
   /session switch <sessionId>
@@ -114,6 +121,8 @@ def parse_cli_input(raw: str) -> CliInput | None:
             return ExitCommand()
         case ["/help"]:
             return HelpCommand()
+        case ["/compact"]:
+            return CompactCommand()
         case ["/session", "new"]:
             return SessionNew()
         case ["/session", "list"]:

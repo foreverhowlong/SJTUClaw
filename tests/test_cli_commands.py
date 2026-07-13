@@ -2,6 +2,7 @@ import pytest
 
 from claw.cli_commands import (
     ChatInput,
+    CompactCommand,
     MemoryAdd,
     SessionList,
     SessionRename,
@@ -22,6 +23,10 @@ def test_parser_accepts_arbitrary_shell_whitespace_and_quotes() -> None:
 
 def test_double_slash_escapes_a_literal_leading_slash() -> None:
     assert parse_cli_input("//session list") == ChatInput("/session list")
+
+
+def test_compact_is_a_local_command() -> None:
+    assert isinstance(parse_cli_input("/compact"), CompactCommand)
 
 
 def test_unknown_and_malformed_commands_raise_parse_error() -> None:

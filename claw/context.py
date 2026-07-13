@@ -47,6 +47,7 @@ class ContextBuilder:
         self,
         messages: Sequence[Message],
         memories: Sequence[MemoryRecord] = (),
+        session_summary: str = "",
     ) -> list[Message]:
         stable_sections = [
             f"[System Prompt]\n{self._system_prompt}",
@@ -57,6 +58,9 @@ class ContextBuilder:
                 f"[{memory.memory_id}]\n{memory.content}" for memory in memories
             )
             stable_sections.append(f"[Memory]\n{rendered_memories}")
+        normalized_summary = session_summary.strip()
+        if normalized_summary:
+            stable_sections.append(f"[Session Summary]\n{normalized_summary}")
         return [
             {"role": "system", "content": "\n\n".join(stable_sections)},
             *(message.copy() for message in messages),

@@ -180,3 +180,166 @@ def test_lock_io_errors_are_wrapped_as_session_errors(tmp_path, monkeypatch) -> 
     monkeypatch.setattr("claw.store.sessions.FileLock.acquire", fail_lock)
     with pytest.raises(SessionError, match="获取 session .* 锁失败"):
         store.load(session.session_id)
+
+
+def test_compaction_record_persists_summary_and_only_exposes_recent_turns(tmp_path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create()
+    first = store.commit_turn(
+        session.session_id,
+        expected_revision=0,
+        messages=TURN,
+    )
+    second_turn = [
+        {"role": "user", "content": "recent question"},
+        {"role": "assistant", "content": "recent answer"},
+    ]
+    second = store.commit_turn(
+        session.session_id,
+        expected_revision=first.revision,
+        messages=second_turn,
+    )
+
+    compacted = store.commit_compaction(
+        session.session_id,
+        expected_revision=second.revision,
+        summary="当前任务：继续回答 recent question。",
+        recent_messages=second_turn,
+    )
+    restored = SessionStore(store.root).load(session.session_id)
+
+    assert compacted.revision == 3
+    assert restored.summary == "当前任务：继续回答 recent question。"
+    assert restored.messages == second_turn
+    records = [
+        json.loads(line)
+        for line in (store.root / session.session_id / "messages.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert records[-1]["type"] == "compaction"
+    assert records[-1]["oldMessageCount"] == 2
+    assert records[-1]["recentMessages"] == second_turn
+
+
+def test_turns_after_compaction_keep_summary_and_revision_order(tmp_path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create()
+    first = store.commit_turn(
+        session.session_id,
+        expected_revision=0,
+        messages=TURN,
+    )
+    recent = [
+        {"role": "user", "content": "recent"},
+        {"role": "assistant", "content": "answer"},
+    ]
+    second = store.commit_turn(
+        session.session_id,
+        expected_revision=first.revision,
+        messages=recent,
+    )
+    compacted = store.commit_compaction(
+        session.session_id,
+        expected_revision=second.revision,
+        summary="saved summary",
+        recent_messages=recent,
+    )
+    final_turn = [
+        {"role": "user", "content": "next"},
+        {"role": "assistant", "content": "done"},
+    ]
+
+    store.commit_turn(
+        session.session_id,
+        expected_revision=compacted.revision,
+        messages=final_turn,
+    )
+    restored = store.load(session.session_id)
+
+    assert restored.summary == "saved summary"
+    assert restored.messages == [*recent, *final_turn]
+    assert restored.revision == 4
+
+
+def test_compaction_rejects_stale_revision_and_non_suffix_without_change(tmp_path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create()
+    committed = store.commit_turn(
+        session.session_id,
+        expected_revision=0,
+        messages=TURN,
+    )
+    next_turn = [
+        {"role": "user", "content": "next"},
+        {"role": "assistant", "content": "next answer"},
+    ]
+    latest = store.commit_turn(
+        session.session_id,
+        expected_revision=committed.revision,
+        messages=next_turn,
+    )
+
+    with pytest.raises(SessionConflictError, match="expected revision"):
+        store.commit_compaction(
+            session.session_id,
+            expected_revision=committed.revision,
+            summary="stale summary",
+            recent_messages=next_turn,
+        )
+    with pytest.raises(SessionError, match="后缀"):
+        store.commit_compaction(
+            session.session_id,
+            expected_revision=latest.revision,
+            summary="invalid summary",
+            recent_messages=TURN,
+        )
+
+    restored = store.load(session.session_id)
+    assert restored.summary == ""
+    assert restored.messages == [*TURN, *next_turn]
+
+
+def test_compaction_append_failure_keeps_complete_active_history(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create()
+    first = store.commit_turn(
+        session.session_id,
+        expected_revision=0,
+        messages=TURN,
+    )
+    recent = [
+        {"role": "user", "content": "recent"},
+        {"role": "assistant", "content": "answer"},
+    ]
+    latest = store.commit_turn(
+        session.session_id,
+        expected_revision=first.revision,
+        messages=recent,
+    )
+    log_path = store.root / session.session_id / "messages.jsonl"
+    before = log_path.read_bytes()
+    original_fsync = os.fsync
+    calls = 0
+
+    def fail_first_fsync(fd: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("simulated disk failure")
+        original_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_first_fsync)
+    with pytest.raises(SessionError, match="提交 session turn 失败"):
+        store.commit_compaction(
+            session.session_id,
+            expected_revision=latest.revision,
+            summary="must not persist",
+            recent_messages=recent,
+        )
+
+    assert log_path.read_bytes() == before
+    assert store.load(session.session_id).messages == [*TURN, *recent]

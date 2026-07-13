@@ -39,6 +39,26 @@ def test_context_builder_adds_memories_before_history() -> None:
     )
 
 
+def test_context_builder_adds_session_summary_after_stable_context() -> None:
+    messages = ContextBuilder("rules", "style").build(
+        [{"role": "user", "content": "continue"}],
+        [MemoryRecord("mem_0123456789ab", "长期偏好")],
+        "当前任务：完成 compaction。",
+    )
+
+    assert messages == [
+        {
+            "role": "system",
+            "content": (
+                "[System Prompt]\nrules\n\n[Soul]\nstyle\n\n"
+                "[Memory]\n[mem_0123456789ab]\n长期偏好\n\n"
+                "[Session Summary]\n当前任务：完成 compaction。"
+            ),
+        },
+        {"role": "user", "content": "continue"},
+    ]
+
+
 def test_context_builder_loads_packaged_defaults() -> None:
     messages = ContextBuilder.from_files().build([])
 

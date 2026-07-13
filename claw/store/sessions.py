@@ -37,6 +37,7 @@ class SessionSummary:
 @dataclass(frozen=True)
 class _MessageLog:
     messages: tuple[Message, ...]
+    summary: str
     revision: int
     last_committed_at: datetime | None
 
@@ -131,7 +132,59 @@ class SessionStore:
                 created_at=snapshot.created_at,
                 updated_at=committed_at,
                 revision=snapshot.revision + 1,
+                summary=snapshot.summary,
                 _messages=tuple([*snapshot.messages, *committed_messages]),
+            )
+
+    def commit_compaction(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        summary: str,
+        recent_messages: Sequence[Message],
+    ) -> Session:
+        """Atomically append a new logical boundary for active conversation state."""
+        normalized_summary = summary.strip()
+        if not normalized_summary:
+            raise SessionError("session summary 不能为空。")
+        retained = self._validate_history(recent_messages)
+
+        with self._locked(session_id):
+            snapshot = self._load_unlocked(session_id)
+            if snapshot.revision != expected_revision:
+                raise SessionConflictError(
+                    f"Session {session_id} 已更新: expected revision "
+                    f"{expected_revision}, current revision {snapshot.revision}。"
+                )
+            if len(retained) >= snapshot.message_count:
+                raise SessionError("compaction 必须压缩至少一条旧消息。")
+            if snapshot.messages[-len(retained) :] != retained:
+                raise SessionError("recent messages 必须是当前 session 历史的后缀。")
+
+            compacted_at = datetime.now(timezone.utc)
+            old_message_count = snapshot.message_count - len(retained)
+            record = {
+                "type": "compaction",
+                "revision": snapshot.revision + 1,
+                "compactedAt": compacted_at.isoformat(),
+                "summary": normalized_summary,
+                "oldMessageCount": old_message_count,
+                "recentMessageCount": len(retained),
+                "recentMessages": retained,
+            }
+            self._append_record(
+                self._session_dir(session_id) / "messages.jsonl",
+                record,
+            )
+            return Session(
+                session_id=snapshot.session_id,
+                title=snapshot.title,
+                created_at=snapshot.created_at,
+                updated_at=compacted_at,
+                revision=snapshot.revision + 1,
+                summary=normalized_summary,
+                _messages=tuple(retained),
             )
 
     def rename(self, session_id: str, title: str) -> Session:
@@ -147,6 +200,7 @@ class SessionStore:
                 created_at=snapshot.created_at,
                 updated_at=datetime.now(timezone.utc),
                 revision=snapshot.revision,
+                summary=snapshot.summary,
                 _messages=tuple(snapshot.messages),
             )
             try:
@@ -197,6 +251,7 @@ class SessionStore:
             created_at=created_at,
             updated_at=updated_at,
             revision=log.revision,
+            summary=log.summary,
             _messages=log.messages,
         )
 
@@ -209,6 +264,7 @@ class SessionStore:
             raise SessionError(f"读取 session 消息失败 {path}: {exc}") from exc
 
         messages: list[Message] = []
+        summary = ""
         revision = 0
         last_committed_at: datetime | None = None
         for line_number, line in enumerate(lines, start=1):
@@ -224,7 +280,10 @@ class SessionStore:
                 revision += 1
                 continue
 
-            if not isinstance(record, dict) or record.get("type") != "turn":
+            if not isinstance(record, dict) or record.get("type") not in {
+                "turn",
+                "compaction",
+            }:
                 raise SessionError(
                     f"Session 数据损坏: {path} 第 {line_number} 行记录格式无效。"
                 )
@@ -233,27 +292,79 @@ class SessionStore:
                 raise SessionError(
                     f"Session 数据损坏: {path} 第 {line_number} 行 revision 无效。"
                 )
-            turn_messages = record.get("messages")
-            if not isinstance(turn_messages, list):
-                raise SessionError(
-                    f"Session 数据损坏: {path} 第 {line_number} 行 messages 无效。"
+            if record["type"] == "turn":
+                turn_messages = record.get("messages")
+                if not isinstance(turn_messages, list):
+                    raise SessionError(
+                        f"Session 数据损坏: {path} 第 {line_number} 行 messages 无效。"
+                    )
+                try:
+                    validated = self._validate_turn(turn_messages)
+                except SessionError as exc:
+                    raise SessionError(
+                        f"Session 数据损坏: {path} 第 {line_number} 行: {exc}"
+                    ) from exc
+                committed_at = self._parse_datetime(
+                    record.get("committedAt"),
+                    path,
+                    f"第 {line_number} 行 committedAt",
                 )
-            try:
-                validated = self._validate_turn(turn_messages)
-            except SessionError as exc:
-                raise SessionError(
-                    f"Session 数据损坏: {path} 第 {line_number} 行: {exc}"
-                ) from exc
-            committed_at = self._parse_datetime(
-                record.get("committedAt"),
-                path,
-                f"第 {line_number} 行 committedAt",
-            )
-            messages.extend(validated)
+                messages.extend(validated)
+            else:
+                committed_at, summary, messages = self._read_compaction_record(
+                    record,
+                    current_messages=messages,
+                    path=path,
+                    line_number=line_number,
+                )
             revision = expected_record_revision
             last_committed_at = committed_at
 
-        return _MessageLog(tuple(messages), revision, last_committed_at)
+        return _MessageLog(tuple(messages), summary, revision, last_committed_at)
+
+    def _read_compaction_record(
+        self,
+        record: dict[str, Any],
+        *,
+        current_messages: list[Message],
+        path: Path,
+        line_number: int,
+    ) -> tuple[datetime, str, list[Message]]:
+        summary = record.get("summary")
+        recent_messages = record.get("recentMessages")
+        old_message_count = record.get("oldMessageCount")
+        recent_message_count = record.get("recentMessageCount")
+        if not isinstance(summary, str) or not summary.strip():
+            raise SessionError(
+                f"Session 数据损坏: {path} 第 {line_number} 行 summary 无效。"
+            )
+        if not isinstance(recent_messages, list):
+            raise SessionError(
+                f"Session 数据损坏: {path} 第 {line_number} 行 recentMessages 无效。"
+            )
+        try:
+            retained = self._validate_history(recent_messages)
+        except SessionError as exc:
+            raise SessionError(
+                f"Session 数据损坏: {path} 第 {line_number} 行: {exc}"
+            ) from exc
+        expected_old_count = len(current_messages) - len(retained)
+        if (
+            not isinstance(old_message_count, int)
+            or old_message_count <= 0
+            or old_message_count != expected_old_count
+            or recent_message_count != len(retained)
+            or current_messages[-len(retained) :] != retained
+        ):
+            raise SessionError(
+                f"Session 数据损坏: {path} 第 {line_number} 行 compaction 边界无效。"
+            )
+        compacted_at = self._parse_datetime(
+            record.get("compactedAt"),
+            path,
+            f"第 {line_number} 行 compactedAt",
+        )
+        return compacted_at, summary.strip(), retained
 
     @staticmethod
     def _validate_turn(messages: Sequence[Message]) -> list[Message]:
@@ -264,6 +375,16 @@ class SessionStore:
         copied = [SessionStore._copy_message(message) for message in messages]
         if [message["role"] for message in copied] != ["user", "assistant"]:
             raise SessionError("turn 消息顺序必须是 user, assistant。")
+        return copied
+
+    @staticmethod
+    def _validate_history(messages: Sequence[Message]) -> list[Message]:
+        copied = [SessionStore._copy_message(message) for message in messages]
+        if not copied or len(copied) % 2 != 0:
+            raise SessionError("recent messages 必须包含完整的 user/assistant turns。")
+        expected_roles = ["user", "assistant"] * (len(copied) // 2)
+        if [message["role"] for message in copied] != expected_roles:
+            raise SessionError("recent messages 必须按 user, assistant 顺序排列。")
         return copied
 
     @staticmethod

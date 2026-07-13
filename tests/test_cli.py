@@ -1,23 +1,38 @@
 from io import StringIO
 
 import claw.cli
+from claw.agent import TurnResult
 from claw.cli import run_repl
+from claw.compaction import CompactionResult
 from claw.errors import LLMError
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
 
 
 class FakeAgent:
-    def __init__(self, responses) -> None:
+    def __init__(self, responses, compact_responses=()) -> None:
         self.responses = iter(responses)
+        self.compact_responses = iter(compact_responses)
         self.calls: list[tuple[str, str]] = []
+        self.compact_calls: list[tuple[str, bool]] = []
 
-    def run_turn(self, session_id: str, user_input: str) -> str:
+    def run_turn(self, session_id: str, user_input: str) -> TurnResult:
         self.calls.append((session_id, user_input))
         response = next(self.responses)
         if isinstance(response, Exception):
             raise response
-        return response
+        if isinstance(response, TurnResult):
+            return response
+        return TurnResult(response)
+
+    def compact_session(
+        self,
+        session_id: str,
+        *,
+        force: bool = True,
+    ) -> CompactionResult:
+        self.compact_calls.append((session_id, force))
+        return next(self.compact_responses)
 
 
 def input_from(values):
@@ -200,3 +215,57 @@ def test_unknown_command_is_not_sent_to_agent(tmp_path) -> None:
 
     assert agent.calls == []
     assert "未知或格式错误" in stderr.getvalue()
+
+
+def test_manual_compact_is_local_and_prints_summary(tmp_path) -> None:
+    sessions, memories = stores(tmp_path)
+    current = sessions.create()
+    result = CompactionResult(
+        session_id=current.session_id,
+        status="compacted",
+        old_message_count=6,
+        recent_message_count=2,
+        summary="当前任务：实现 compaction。",
+    )
+    agent = FakeAgent([], [result])
+    stdout = StringIO()
+
+    assert run_repl(
+        agent,
+        sessions,
+        memories,
+        initial_session_id=current.session_id,
+        input_fn=input_from(["/compact", "/exit"]),
+        stdout=stdout,
+    ) == 0
+
+    assert agent.calls == []
+    assert agent.compact_calls == [(current.session_id, True)]
+    assert "old_messages=6, recent_messages=2" in stdout.getvalue()
+    assert "当前任务：实现 compaction。" in stdout.getvalue()
+
+
+def test_auto_compaction_failure_is_visible_without_hiding_reply(tmp_path) -> None:
+    sessions, memories = stores(tmp_path)
+    failed = CompactionResult(
+        session_id=sessions.create().session_id,
+        status="failed",
+        old_message_count=4,
+        recent_message_count=2,
+        detail="生成 summary 失败，旧消息未删除。",
+    )
+    agent = FakeAgent([TurnResult("reply", failed)])
+    stdout = StringIO()
+    stderr = StringIO()
+
+    assert run_repl(
+        agent,
+        sessions,
+        memories,
+        input_fn=input_from(["hello", "/exit"]),
+        stdout=stdout,
+        stderr=stderr,
+    ) == 0
+
+    assert "Assistant> reply" in stdout.getvalue()
+    assert "旧消息未删除" in stderr.getvalue()
