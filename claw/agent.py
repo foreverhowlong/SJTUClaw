@@ -16,6 +16,7 @@ from claw.events import AgentEvent
 from claw.llm import LLMStreamEvent
 from claw.messages import Message
 from claw.session import Session
+from claw.store.attachments import AttachmentStore
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
 from claw.tools import ToolCall, ToolRegistry, ToolResult, build_read_only_registry
@@ -47,6 +48,7 @@ class AgentService:
         compactor: Compactor | None = None,
         tool_registry: ToolRegistry | None = None,
         approval_policy: ApprovalPolicy | None = None,
+        attachment_store: AttachmentStore | None = None,
     ) -> None:
         self._llm = llm
         self._store = store
@@ -55,6 +57,7 @@ class AgentService:
         self._compactor = compactor
         self._tools = tool_registry or build_read_only_registry()
         self._approval_policy = approval_policy or DenyAllPolicy()
+        self._attachment_store = attachment_store
 
     async def run_turn(
         self,
@@ -71,7 +74,9 @@ class AgentService:
             working: list[Message] = [{"role": "user", "content": user_input}]
             snapshot = self._store.load(session_id)
             if self._compactor is not None:
-                request_chars = self._request_chars(snapshot, working, definitions)
+                request_chars = self._request_chars(
+                    session_id, snapshot, working, definitions
+                )
                 if self._compactor.should_compact(request_chars):
                     yield AgentEvent(
                         "compaction_started",
@@ -85,6 +90,7 @@ class AgentService:
                     yield AgentEvent("compaction_done", session_id, asdict(result))
                     snapshot = self._store.load(session_id)
                     remaining_chars = self._request_chars(
+                        session_id,
                         snapshot,
                         working,
                         definitions,
@@ -97,7 +103,7 @@ class AgentService:
                             session_id,
                             {
                                 "code": "context_still_oversized",
-                                "message": "上下文压缩未能降到目标预算，将继续本轮。",
+                                "message": "上下文压缩未能降到目标预算，但仍将继续本轮。",
                                 "requestCharacters": remaining_chars,
                             },
                         )
@@ -123,22 +129,30 @@ class AgentService:
 
     def _build_context(
         self,
+        session_id: str,
         snapshot: Session,
         working: list[Message],
     ) -> list[Message]:
+        attachments = (
+            self._attachment_store.list(session_id)
+            if self._attachment_store is not None
+            else ()
+        )
         return self._context_builder.build(
             [*snapshot.messages, *working],
             self._memory_store.list(),
             snapshot.summary,
+            attachments,
         )
 
     def _request_chars(
         self,
+        session_id: str,
         snapshot: Session,
         working: list[Message],
         definitions: list[dict],
     ) -> int:
-        messages = self._build_context(snapshot, working)
+        messages = self._build_context(session_id, snapshot, working)
         return serialized_request_chars(messages, definitions)
 
     async def _run_loop(
@@ -149,7 +163,7 @@ class AgentService:
         definitions: list[dict],
     ) -> AsyncIterator[AgentEvent]:
         while True:
-            messages = self._build_context(snapshot, working)
+            messages = self._build_context(session_id, snapshot, working)
             completion = None
             async for llm_event in self._llm.stream_chat(messages, definitions):
                 if llm_event.type == "text_delta":

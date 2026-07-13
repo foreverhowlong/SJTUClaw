@@ -14,3 +14,5 @@ logs/*
 !logs/.gitkeep
 .idea
 .DS_store
+web/node_modules/
+web/dist/

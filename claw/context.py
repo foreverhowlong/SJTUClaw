@@ -10,6 +10,7 @@ from pathlib import Path
 
 from claw.errors import ConfigError
 from claw.messages import Message
+from claw.store.attachments import AttachmentMetadata
 from claw.store.memory import MemoryRecord
 
 
@@ -52,6 +53,7 @@ class ContextBuilder:
         messages: Sequence[Message],
         memories: Sequence[MemoryRecord] = (),
         session_summary: str = "",
+        attachments: Sequence[AttachmentMetadata] = (),
     ) -> list[Message]:
         stable_sections = [
             f"[System Prompt]\n{self._system_prompt}",
@@ -65,6 +67,19 @@ class ContextBuilder:
         normalized_summary = session_summary.strip()
         if normalized_summary:
             stable_sections.append(f"[Session Summary]\n{normalized_summary}")
+        if attachments:
+            rendered_attachments = "\n".join(
+                "- "
+                f"{item.filename} (attachmentId={item.attachment_id}, "
+                f"size={item.size}, contentType={item.content_type})"
+                for item in attachments
+            )
+            stable_sections.append(
+                "[Session Attachments]\n"
+                "These files belong to this session. Metadata does not grant "
+                "workspace access or permission to modify them.\n"
+                f"{rendered_attachments}"
+            )
         return [
             {"role": "system", "content": "\n\n".join(stable_sections)},
             *project_messages(messages),

@@ -28,14 +28,10 @@ from claw.cli_commands import (
     SessionSwitch,
     parse_cli_input,
 )
-from claw.compaction import CompactionResult, Compactor, load_compaction_prompt
-from claw.config import load_llm_config
-from claw.context import ContextBuilder
+from claw.compaction import CompactionResult
 from claw.errors import ClawError, CommandParseError
 from claw.events import AgentEvent
-from claw.llm import LLMClient
-from claw.logging_config import configure_logging
-from claw.paths import RuntimePaths
+from claw.runtime import build_runtime
 from claw.session import Session
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
@@ -313,28 +309,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        paths = RuntimePaths.from_environment()
-        configure_logging(paths.logs_dir)
-        config = load_llm_config(paths.env_file)
-        session_store = SessionStore(paths.sessions_dir)
-        memory_store = MemoryStore(paths.memory_dir)
-        llm = LLMClient(config)
-        compactor = Compactor(
-            llm,
-            session_store,
-            load_compaction_prompt(),
+        runtime = build_runtime()
+        return asyncio.run(
+            run_repl(
+                runtime.agent,
+                runtime.session_store,
+                runtime.memory_store,
+            )
         )
-        agent = AgentService(
-            llm,
-            session_store,
-            ContextBuilder.from_files(
-                paths.system_prompt_file,
-                paths.soul_file,
-            ),
-            memory_store,
-            compactor,
-        )
-        return asyncio.run(run_repl(agent, session_store, memory_store))
     except KeyboardInterrupt:
         print("\n已中断。", file=sys.stderr)
         return 130

@@ -1,6 +1,6 @@
 # SJTUClaw
 
-SJTUClaw is a minimal agent runtime course project. The current implementation covers Step 5: persistent multi-session context, safe compaction, streamed OpenAI-compatible tool calling, and a read-only environment feedback loop rendered by the CLI.
+SJTUClaw is a minimal agent runtime course project. The current implementation covers Step 6: persistent multi-session context, safe compaction, streamed OpenAI-compatible tool calling, a read-only environment feedback loop, and a shared FastAPI Gateway with a React command center.
 
 ## Setup
 
@@ -48,6 +48,64 @@ User> 读取 README.md 并总结项目内容。
 [tool_result] read_file {"path":".../README.md","content":"...","truncated":false}
 Assistant> README.md describes a minimal agent runtime...
 ```
+
+## Gateway and Web command center
+
+Build the browser interface once, then start the Gateway:
+
+```bash
+cd web
+npm install
+npm run build
+cd ..
+uv run python -m gateway
+```
+
+Open `http://127.0.0.1:8000`. The Gateway serves the production Web build and
+uses the same `AgentService`, `SessionStore`, context builder, memory store,
+compactor, and tool registry as the CLI. It never sends the LLM API key to the
+browser.
+
+For frontend development, run the Gateway and Vite in separate terminals:
+
+```bash
+uv run python -m gateway
+cd web && npm run dev
+```
+
+Vite proxies `/api` and `/ws` to the local Gateway. The interface is a
+three-column agent command center: shared sessions on the left, persisted chat
+history in the middle, and structured runtime activity plus session attachments
+on the right. On smaller screens the side panels become drawers.
+
+The REST surface is intentionally small:
+
+- `GET /api/sessions` lists sessions created by either CLI or Web.
+- `POST /api/sessions` creates a session.
+- `GET /api/sessions/{sessionId}` returns persisted history.
+- `GET/POST /api/sessions/{sessionId}/attachments` lists or uploads attachments.
+
+`/ws/chat` accepts `run_turn` frames with `requestId`, optional `sessionId`, and
+`message`. A missing session ID creates a new session; an unknown ID returns a
+structured error. The Gateway first emits `session_resolved`, then wraps each
+existing `AgentEvent` as `agent_event`. Transport failures use `gateway_error`.
+One failed request does not terminate the connection or server.
+
+Web requests for the same session are serialized inside the Gateway. Concurrent
+CLI updates remain protected by the SessionStore revision check.
+
+## Session attachments
+
+Uploaded files are stored below
+`data/sessions/<sessionId>/attachments/`. The user-supplied filename is metadata;
+the server generates the on-disk attachment ID, rejects unsafe filenames, and
+limits uploads to 10 MiB. Each session has an atomic `index.json`, and APIs only
+list metadata for the requested session.
+
+Attachment metadata is included in that session's model context. Uploading a
+file does not make it a workspace file, grant permission to modify it, or add a
+new shell/write capability. Step 6 intentionally does not parse attachment
+contents.
 
 ## Session commands
 
@@ -201,6 +259,7 @@ only a stable error code and a user-safe summary.
 
 ```bash
 uv run pytest
+cd web && npm test && npm run build
 ```
 
 The real `.env` file and runtime outputs under `data/` or `logs/` are ignored by Git.

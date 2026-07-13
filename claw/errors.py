@@ -25,6 +25,10 @@ class SessionConflictError(SessionError):
     """Raised when a turn is based on a stale session revision."""
 
 
+class AttachmentError(ClawError):
+    """Raised when a session attachment cannot be stored or read safely."""
+
+
 class MemoryError(ClawError):
     """Raised when long-term memory cannot be loaded or persisted safely."""
 

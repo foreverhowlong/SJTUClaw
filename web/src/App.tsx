@@ -1,0 +1,311 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+import {
+  createSession,
+  getSession,
+  listAttachments,
+  listSessions,
+  uploadAttachment,
+} from "./api";
+import { ConversationPane } from "./components/ConversationPane";
+import { InspectorPanel } from "./components/InspectorPanel";
+import { SessionRail } from "./components/SessionRail";
+import { applyAgentEvent, EMPTY_RUN, settleRun, startRun } from "./state";
+import type {
+  AttachmentMetadata,
+  GatewayMessage,
+  SessionDetail,
+  SessionRunState,
+  SessionSummary,
+} from "./types";
+import { useGatewaySocket } from "./useGatewaySocket";
+
+export default function App() {
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [details, setDetails] = useState<Record<string, SessionDetail>>({});
+  const [attachments, setAttachments] = useState<
+    Record<string, AttachmentMetadata[]>
+  >({});
+  const [runs, setRuns] = useState<Record<string, SessionRunState>>({});
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [leftOpen, setLeftOpen] = useState(false);
+  const [rightOpen, setRightOpen] = useState(false);
+
+  const refreshSessions = useCallback(async () => {
+    const items = await listSessions();
+    setSessions(items);
+    return items;
+  }, []);
+
+  const loadSession = useCallback(async (sessionId: string) => {
+    const [detail, files] = await Promise.all([
+      getSession(sessionId),
+      listAttachments(sessionId),
+    ]);
+    setDetails((previous) => ({ ...previous, [sessionId]: detail }));
+    setAttachments((previous) => ({ ...previous, [sessionId]: files }));
+  }, []);
+
+  const selectSession = useCallback(
+    async (sessionId: string) => {
+      setActiveSessionId(sessionId);
+      setLeftOpen(false);
+      setError(null);
+      try {
+        await loadSession(sessionId);
+      } catch (reason) {
+        setError(errorMessage(reason));
+      }
+    },
+    [loadSession],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const bootstrap = async () => {
+      try {
+        let items = await refreshSessions();
+        if (items.length === 0) {
+          const created = await createSession();
+          items = await refreshSessions();
+          if (!cancelled) {
+            setActiveSessionId(created.sessionId);
+            setDetails({ [created.sessionId]: created });
+            setAttachments({ [created.sessionId]: [] });
+          }
+        } else if (!cancelled) {
+          setActiveSessionId(items[0].sessionId);
+          await loadSession(items[0].sessionId);
+        }
+      } catch (reason) {
+        if (!cancelled) setError(errorMessage(reason));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void bootstrap();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadSession, refreshSessions]);
+
+  const handleGatewayMessage = useCallback(
+    (message: GatewayMessage) => {
+      if (message.type === "gateway_error") {
+        setError(message.error.message);
+        setRuns((previous) => {
+          const next = { ...previous };
+          for (const [sessionId, run] of Object.entries(next)) {
+            if (run.requestId === message.requestId) {
+              next[sessionId] = settleRun(run);
+            }
+          }
+          return next;
+        });
+        return;
+      }
+
+      if (message.type === "session_resolved") {
+        const session = message.session;
+        setDetails((previous) => ({ ...previous, [session.sessionId]: session }));
+        if (message.created) {
+          setActiveSessionId(session.sessionId);
+          void refreshSessions();
+        }
+        return;
+      }
+
+      const event = message.event;
+      setRuns((previous) => ({
+        ...previous,
+        [event.sessionId]: applyAgentEvent(previous[event.sessionId], event),
+      }));
+      if (event.type === "error" && typeof event.payload.message === "string") {
+        setError(event.payload.message);
+      }
+      if (event.type === "turn_end") {
+        void Promise.all([
+          loadSession(event.sessionId),
+          refreshSessions(),
+        ])
+          .catch((reason) => setError(errorMessage(reason)))
+          .finally(() => {
+            setRuns((previous) => ({
+              ...previous,
+              [event.sessionId]: settleRun(previous[event.sessionId]),
+            }));
+          });
+      }
+    },
+    [loadSession, refreshSessions],
+  );
+
+  const { connection, sendTurn } = useGatewaySocket(handleGatewayMessage);
+
+  const handleNewSession = useCallback(async () => {
+    try {
+      const created = await createSession();
+      setDetails((previous) => ({ ...previous, [created.sessionId]: created }));
+      setAttachments((previous) => ({ ...previous, [created.sessionId]: [] }));
+      setActiveSessionId(created.sessionId);
+      setLeftOpen(false);
+      await refreshSessions();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    }
+  }, [refreshSessions]);
+
+  const handleSend = useCallback(
+    (content: string) => {
+      if (!activeSessionId) return;
+      const requestId = `request_${crypto.randomUUID().replaceAll("-", "")}`;
+      setError(null);
+      setRuns((previous) => ({
+        ...previous,
+        [activeSessionId]: startRun(
+          previous[activeSessionId],
+          requestId,
+          content,
+        ),
+      }));
+      try {
+        sendTurn(requestId, activeSessionId, content);
+      } catch (reason) {
+        setRuns((previous) => ({
+          ...previous,
+          [activeSessionId]: settleRun(previous[activeSessionId]),
+        }));
+        setError(errorMessage(reason));
+      }
+    },
+    [activeSessionId, sendTurn],
+  );
+
+  const handleUpload = useCallback(
+    async (file: File) => {
+      if (!activeSessionId) return;
+      try {
+        await uploadAttachment(activeSessionId, file);
+        const files = await listAttachments(activeSessionId);
+        setAttachments((previous) => ({
+          ...previous,
+          [activeSessionId]: files,
+        }));
+      } catch (reason) {
+        setError(errorMessage(reason));
+      }
+    },
+    [activeSessionId],
+  );
+
+  const activeDetail = activeSessionId ? details[activeSessionId] : undefined;
+  const activeRun = activeSessionId
+    ? runs[activeSessionId] ?? EMPTY_RUN
+    : EMPTY_RUN;
+  const activeAttachments = activeSessionId
+    ? attachments[activeSessionId] ?? []
+    : [];
+  const currentTitle = activeDetail?.title ?? "正在准备会话";
+  const connectionLabel = useMemo(
+    () => connection.toUpperCase(),
+    [connection],
+  );
+
+  return (
+    <main className="page-shell">
+      <section className="app-shell" aria-label="SJTUClaw Agent Command Center">
+        <header className="top-bar">
+          <div className="brand-block">
+            <button
+              className="mobile-toggle"
+              type="button"
+              onClick={() => setLeftOpen(true)}
+              aria-label="打开 session 列表"
+            >
+              ≡
+            </button>
+            <div>
+              <div className="brand">SJTUClaw</div>
+              <div className="micro-label">AGENT COMMAND CENTER</div>
+            </div>
+          </div>
+          <div className="current-session-heading">
+            <span className="micro-label">CURRENT SESSION</span>
+            <strong>{currentTitle}</strong>
+          </div>
+          <div className="top-actions">
+            <span className={`connection-pill connection-${connection}`}>
+              <span aria-hidden="true" className="connection-dot" />
+              {connectionLabel}
+            </span>
+            <button className="primary-button" type="button" onClick={handleNewSession}>
+              <span aria-hidden="true">＋</span> NEW
+            </button>
+            <button
+              className="mobile-toggle"
+              type="button"
+              onClick={() => setRightOpen(true)}
+              aria-label="打开 Agent Activity"
+            >
+              ◫
+            </button>
+          </div>
+        </header>
+
+        {error && (
+          <div className="error-banner" role="alert">
+            <span><strong>ERROR</strong> {error}</span>
+            <button type="button" onClick={() => setError(null)} aria-label="关闭错误提示">
+              ×
+            </button>
+          </div>
+        )}
+
+        <div className="workspace-grid">
+          <SessionRail
+            className={leftOpen ? "is-open" : ""}
+            sessions={sessions}
+            activeSessionId={activeSessionId}
+            loading={loading}
+            onSelect={selectSession}
+            onNew={handleNewSession}
+            onClose={() => setLeftOpen(false)}
+          />
+          <ConversationPane
+            key={activeSessionId}
+            detail={activeDetail}
+            run={activeRun}
+            connection={connection}
+            loading={loading}
+            onSend={handleSend}
+          />
+          <InspectorPanel
+            className={rightOpen ? "is-open" : ""}
+            events={activeRun.events}
+            attachments={activeAttachments}
+            disabled={!activeSessionId}
+            onUpload={handleUpload}
+            onClose={() => setRightOpen(false)}
+          />
+        </div>
+        {(leftOpen || rightOpen) && (
+          <button
+            className="drawer-backdrop"
+            type="button"
+            aria-label="关闭面板"
+            onClick={() => {
+              setLeftOpen(false);
+              setRightOpen(false);
+            }}
+          />
+        )}
+      </section>
+    </main>
+  );
+}
+
+function errorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : "发生未知错误。";
+}
