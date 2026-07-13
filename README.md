@@ -1,6 +1,6 @@
 # SJTUClaw
 
-SJTUClaw is a minimal agent runtime course project. The current implementation covers Step 1: running an in-memory, multi-turn CLI conversation through an OpenAI-compatible LLM API.
+SJTUClaw is a minimal agent runtime course project. The current implementation covers Step 3: persistent sessions plus stable system prompt, soul, and cross-session memory context in a multi-turn CLI conversation through an OpenAI-compatible LLM API.
 
 ## Setup
 
@@ -27,7 +27,7 @@ LLM_MODEL=gpt-4.1-mini
 uv run python -m claw.cli
 ```
 
-The CLI keeps the current conversation history for the lifetime of the process and sends it with every request. Type `/exit` to leave the conversation:
+The CLI restores the most recently updated session on startup. It sends only that session's history with each request. Type `/exit` to leave the conversation:
 
 ```text
 claw started. Type /exit to quit.
@@ -37,7 +37,37 @@ User> /exit
 bye.
 ```
 
-Session history is currently in memory only and is discarded when the process exits.
+## Session commands
+
+Session commands are handled locally and are never sent to the LLM:
+
+```text
+/session new
+/session list
+/session switch <sessionId>
+/session rename <sessionId> <title>
+/session delete <sessionId>
+```
+
+Each session is stored independently under `data/sessions/<sessionId>/` using `meta.json` and `messages.jsonl`. Session data is restored after a restart. Invalid or corrupt session files produce a visible error instead of being replaced silently.
+
+## Stable context and memory
+
+Stable context is assembled before the current session history on every LLM request:
+
+1. `prompts/system_prompt.md` defines runtime rules and behavior boundaries.
+2. `prompts/soul.md` defines Claw's stable identity and interaction style.
+3. Manually managed memories provide long-term facts and preferences across sessions.
+
+System prompt and soul changes take effect after restarting the CLI. Memory commands are handled locally and are never sent to the LLM as user messages:
+
+```text
+/memory add <content>
+/memory list
+/memory delete <memoryId>
+```
+
+Each memory is stored as a readable Markdown file under `data/memory/`. Step 3 only supports explicit, manual memory updates; ordinary conversation cannot rewrite stable context.
 
 ## Test
 

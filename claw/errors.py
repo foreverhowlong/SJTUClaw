@@ -12,3 +12,10 @@ class ConfigError(ClawError):
 class LLMError(ClawError):
     """Raised when the LLM provider request or response fails."""
 
+
+class SessionError(ClawError):
+    """Raised when session state cannot be loaded or persisted safely."""
+
+
+class MemoryError(ClawError):
+    """Raised when long-term memory cannot be loaded or persisted safely."""
