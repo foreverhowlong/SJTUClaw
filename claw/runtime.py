@@ -17,6 +17,7 @@ from claw.paths import RuntimePaths
 from claw.scheduler import Scheduler
 from claw.session_coordination import SessionCoordinator
 from claw.session_lifecycle import SessionLifecycleService
+from claw.session_title import SessionTitleGenerator, load_session_title_prompt
 from claw.shell import ShellManager
 from claw.skills import SkillRegistry
 from claw.store.approvals import ApprovalStore
@@ -79,6 +80,7 @@ def build_runtime(paths: RuntimePaths | None = None) -> ClawRuntime:
         attachment_store,
         download_store,
         shell_manager,
+        memory_store,
     )
     llm = LLMClient(config)
     compactor = Compactor(llm, session_store, load_compaction_prompt())
@@ -97,6 +99,7 @@ def build_runtime(paths: RuntimePaths | None = None) -> ClawRuntime:
         skill_registry=skill_registry,
         session_coordinator=session_coordinator,
         tool_execution_coordinator=tool_execution_coordinator,
+        title_generator=SessionTitleGenerator(llm, load_session_title_prompt()),
     )
     scheduler = Scheduler(task_store, session_store, agent)
     session_lifecycle = SessionLifecycleService(

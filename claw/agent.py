@@ -15,8 +15,9 @@ from claw.errors import LLMError, ToolError
 from claw.events import AgentEvent
 from claw.llm import LLMStreamEvent
 from claw.messages import Message, MessageSource, TextMessage
-from claw.session import Session
+from claw.session import DEFAULT_SESSION_TITLE, Session
 from claw.session_coordination import SessionCoordinator
+from claw.session_title import SessionTitleGenerator
 from claw.skills import SkillRegistry, SkillRequest
 from claw.skills.turn import SkillTurn
 from claw.store.attachments import AttachmentStore
@@ -72,6 +73,7 @@ class AgentService:
         turn_limits: TurnLimits | None = None,
         session_coordinator: SessionCoordinator | None = None,
         tool_execution_coordinator: ToolExecutionCoordinator | None = None,
+        title_generator: SessionTitleGenerator | None = None,
     ) -> None:
         self._llm = llm
         self._store = store
@@ -86,6 +88,7 @@ class AgentService:
         self._turn_limits = turn_limits or TurnLimits()
         self._session_coordinator = session_coordinator or SessionCoordinator(store.root)
         self._tool_execution_coordinator = tool_execution_coordinator
+        self._title_generator = title_generator
         self._tool_loop = ToolLoopRunner(
             self._approval_policy,
             tool_execution_coordinator,
@@ -121,12 +124,14 @@ class AgentService:
         snapshot: Session | None = None
         working: list[Message] = []
         skill_turn: SkillTurn | None = None
+        title_task: asyncio.Task[str] | None = None
         try:
             user_message: TextMessage = {"role": "user", "content": user_input}
             if source is not None:
                 user_message["source"] = source
             working = [user_message]
             snapshot = self._store.load(session_id)
+            title_task = self._start_title_generation(snapshot, user_input, source)
             turn_context = self._capture_turn_context(session_id)
             if turn_context.skills is not None:
                 skill_turn = SkillTurn(
@@ -190,8 +195,12 @@ class AgentService:
                 skill_turn,
             ):
                 yield event
+            await self._apply_generated_title(session_id, title_task)
+            title_task = None
             yield AgentEvent("turn_end", session_id, {"status": "completed"})
         except asyncio.CancelledError:
+            await self._discard_title_generation(title_task)
+            title_task = None
             committed = commit_interrupted_tool_turn(
                 self._store,
                 session_id,
@@ -204,6 +213,8 @@ class AgentService:
             self._mark_executions_recorded(session_id, working, committed)
             raise
         except Exception as exc:
+            await self._discard_title_generation(title_task)
+            title_task = None
             logger.exception("agent turn failed: session=%s", session_id)
             code, message = public_error(exc)
             committed = commit_interrupted_tool_turn(
@@ -222,6 +233,61 @@ class AgentService:
                 {"code": code, "message": message},
             )
             yield AgentEvent("turn_end", session_id, {"status": "failed"})
+
+    def _start_title_generation(
+        self,
+        snapshot: Session,
+        user_input: str,
+        source: MessageSource | None,
+    ) -> asyncio.Task[str] | None:
+        if (
+            self._title_generator is None
+            or snapshot.message_count != 0
+            or snapshot.title != DEFAULT_SESSION_TITLE
+            or source == "scheduled_task"
+        ):
+            return None
+        return asyncio.create_task(self._title_generator.generate(user_input))
+
+    async def _apply_generated_title(
+        self,
+        session_id: str,
+        task: asyncio.Task[str] | None,
+    ) -> None:
+        if task is None:
+            return
+        try:
+            title = await task
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "session title generation failed: session=%s",
+                session_id,
+                exc_info=True,
+            )
+            return
+        try:
+            self._store.rename(session_id, title)
+        except Exception:
+            logger.warning(
+                "session title persistence failed: session=%s",
+                session_id,
+                exc_info=True,
+            )
+
+    @staticmethod
+    async def _discard_title_generation(task: asyncio.Task[str] | None) -> None:
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
 
     def _build_context(
         self,

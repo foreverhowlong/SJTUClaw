@@ -127,6 +127,7 @@ export default function App() {
       if (message.type === "session_updated") {
         void Promise.all([
           loadSession(message.sessionId),
+          memory.refresh(),
           refreshSessions(),
         ]).catch((reason) => setError(errorMessage(reason)));
         return;
@@ -164,6 +165,14 @@ export default function App() {
       if (event.type === "error" && typeof event.payload.message === "string") {
         setError(event.payload.message);
       }
+      if (
+        event.type === "tool_result" &&
+        event.payload.ok === true &&
+        (event.payload.name === "save_memory" ||
+          event.payload.name === "delete_memory")
+      ) {
+        void memory.refresh().catch((reason) => setError(errorMessage(reason)));
+      }
       if (event.type === "turn_end") {
         void Promise.all([
           loadSession(event.sessionId),
@@ -178,7 +187,7 @@ export default function App() {
           });
       }
     },
-    [loadSession, refreshSessions],
+    [loadSession, memory.refresh, refreshSessions],
   );
 
   const { connection, sendTurn } = useGatewaySocket(handleGatewayMessage);

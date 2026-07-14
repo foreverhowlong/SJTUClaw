@@ -265,6 +265,15 @@ def test_tool_definition_rejects_invalid_safety_combinations() -> None:
             lambda _args: None,
             safety_level="advanced",
         )
+    with pytest.raises(ToolError, match="memory_write"):
+        ToolDefinition(
+            "remember",
+            "Remember.",
+            {"type": "object", "properties": {}},
+            lambda _args: None,
+            safety_level="memory_write",
+            requires_approval=True,
+        )
 
 
 @pytest.mark.parametrize("unsupported_type", ["array", "object", "null"])

@@ -11,12 +11,15 @@ from claw.messages import Message
 from claw.skills.models import SkillUsage
 
 
+DEFAULT_SESSION_TITLE = "新会话"
+
+
 @dataclass(frozen=True)
 class Session:
     """Describe one committed version of a conversation."""
 
     session_id: str = field(default_factory=lambda: f"session_{uuid4().hex[:12]}")
-    title: str = "新会话"
+    title: str = DEFAULT_SESSION_TITLE
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     revision: int = 0

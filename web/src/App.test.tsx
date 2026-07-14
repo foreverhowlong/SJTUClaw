@@ -4,7 +4,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import type { SessionDetail, SessionSummary } from "./types";
+import type { GatewayMessage, SessionDetail, SessionSummary } from "./types";
 
 const mocks = vi.hoisted(() => ({
   sessions: [] as SessionSummary[],
@@ -14,13 +14,8 @@ const mocks = vi.hoisted(() => ({
   getSession: vi.fn(),
   deleteSession: vi.fn(),
   compactSession: vi.fn(),
-  gatewayHandler: null as
-    | ((message: {
-        type: "session_updated";
-        sessionId: string;
-        reason: "scheduled_task";
-      }) => void)
-    | null,
+  listMemories: vi.fn().mockResolvedValue([]),
+  gatewayHandler: null as ((message: GatewayMessage) => void) | null,
 }));
 
 vi.mock("./api", () => ({
@@ -35,7 +30,7 @@ vi.mock("./api", () => ({
   listScheduledTasks: vi.fn().mockResolvedValue([]),
   createScheduledTask: vi.fn(),
   cancelScheduledTask: vi.fn(),
-  listMemories: vi.fn().mockResolvedValue([]),
+  listMemories: mocks.listMemories,
   listSkills: vi.fn().mockResolvedValue([]),
   listSkillUsages: vi.fn().mockResolvedValue([]),
   createMemory: vi.fn(),
@@ -44,11 +39,7 @@ vi.mock("./api", () => ({
 
 vi.mock("./useGatewaySocket", () => ({
   useGatewaySocket: (
-    handler: (message: {
-      type: "session_updated";
-      sessionId: string;
-      reason: "scheduled_task";
-    }) => void,
+    handler: (message: GatewayMessage) => void,
   ) => {
     mocks.gatewayHandler = handler;
     return { connection: "connected", sendTurn: vi.fn() };
@@ -64,6 +55,7 @@ beforeAll(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  mocks.listMemories.mockResolvedValue([]);
 });
 
 function makeSession(sessionId: string, title: string): SessionDetail {
@@ -74,14 +66,47 @@ function makeSession(sessionId: string, title: string): SessionDetail {
     createdAt: "2026-07-13T00:00:00Z",
     updatedAt: "2026-07-13T00:00:00Z",
     revision: 0,
-  summary: "",
-  workspace: null,
+    summary: "",
+    workspace: null,
     messages: [],
     timeline: [],
   };
 }
 
 describe("App session lifecycle", () => {
+  it.each(["save_memory", "delete_memory"])(
+    "refreshes memories after a successful %s result",
+    async (toolName) => {
+      const session = makeSession("session_0123456789ab", "Memory session");
+      mocks.sessions = [session];
+      mocks.details = { [session.sessionId]: session };
+      mocks.listSessions.mockImplementation(async () => [...mocks.sessions]);
+      mocks.getSession.mockImplementation(
+        async (sessionId: string) => mocks.details[sessionId],
+      );
+      mocks.listMemories.mockResolvedValue([]);
+
+      render(<App />);
+      await screen.findByRole("heading", { name: "Memory session" });
+      await waitFor(() => expect(mocks.listMemories).toHaveBeenCalledTimes(1));
+
+      await act(async () => {
+        mocks.gatewayHandler?.({
+          type: "agent_event",
+          requestId: "request_memory",
+          event: {
+            type: "tool_result",
+            sessionId: session.sessionId,
+            timestamp: "2026-07-14T00:00:00Z",
+            payload: { name: toolName, ok: true },
+          },
+        });
+      });
+
+      await waitFor(() => expect(mocks.listMemories).toHaveBeenCalledTimes(2));
+    },
+  );
+
   it("compacts the active session and renders the refreshed revision", async () => {
     const user = userEvent.setup();
     const session = makeSession("session_0123456789ab", "Long session");

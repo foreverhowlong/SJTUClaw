@@ -18,7 +18,7 @@ from filelock import FileLock, Timeout
 
 from claw.errors import SessionConflictError, SessionError
 from claw.messages import Message
-from claw.session import Session
+from claw.session import DEFAULT_SESSION_TITLE, Session
 from claw.skills.models import SkillUsage
 from claw.store.session_log import parse_datetime, read_message_log
 from claw.store.session_messages import validate_history, validate_turn
@@ -43,8 +43,8 @@ class SessionStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
 
-    def create(self, title: str = "新会话") -> Session:
-        normalized_title = title.strip() or "新会话"
+    def create(self, title: str = DEFAULT_SESSION_TITLE) -> Session:
+        normalized_title = title.strip() or DEFAULT_SESSION_TITLE
         while True:
             session = Session(title=normalized_title)
             session_dir = self._session_dir(session.session_id)

@@ -2,6 +2,7 @@ from claw.context import ContextBuilder
 from claw.shell import ShellManager
 from claw.store.attachments import AttachmentStore
 from claw.store.downloads import DownloadStore
+from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
 from claw.tools.factory import SessionToolProvider
 
@@ -13,6 +14,7 @@ def test_session_tool_catalog_exposes_planning_constraints(tmp_path) -> None:
         AttachmentStore(sessions),
         DownloadStore(tmp_path / "downloads", ttl_seconds=60),
         ShellManager(),
+        MemoryStore(tmp_path / "memory"),
     )
 
     definitions = {
@@ -33,6 +35,8 @@ def test_session_tool_catalog_exposes_planning_constraints(tmp_path) -> None:
         in definitions["copy_attachment_to_workspace"]["description"]
     )
     assert "1-minute" in definitions["create_download"]["description"]
+    assert "cross-session" in definitions["save_memory"]["description"]
+    assert "requires user approval" in definitions["delete_memory"]["description"]
     assert "do not update this download" in definitions["create_download"]["description"]
     assert "defaults to the workspace root" in definitions["new_shell"]["description"]
     assert "persist across calls" in definitions["run_command"]["description"]

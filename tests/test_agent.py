@@ -11,6 +11,7 @@ from claw.compaction import CompactionResult
 from claw.context import ContextBuilder
 from claw.errors import LLMError, SessionError, ToolError
 from claw.llm import LLMCompletion, LLMStreamEvent, Message
+from claw.session import DEFAULT_SESSION_TITLE
 from claw.store.attachments import AttachmentStore
 from claw.store.approvals import ApprovalStore
 from claw.store.memory import MemoryStore
@@ -18,6 +19,7 @@ from claw.store.sessions import SessionStore
 from claw.store.tool_executions import ToolExecutionStore
 from claw.tool_execution import ToolExecutionCoordinator
 from claw.tools import ToolCall, ToolDefinition, ToolRegistry
+from claw.tools.memory import register_memory_tools
 from claw.turn_limits import TurnLimits
 
 
@@ -92,6 +94,156 @@ def test_agent_runs_streamed_turns_for_explicit_session(tmp_path) -> None:
         {"role": "assistant", "content": "你好，小明。"},
         {"role": "user", "content": "我叫什么？"},
     ]
+
+
+def test_agent_generates_title_once_for_the_first_successful_user_turn(tmp_path) -> None:
+    class RecordingTitleGenerator:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def generate(self, user_input):
+            self.calls.append(user_input)
+            return "Session 持久化分析"
+
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create()
+    title_generator = RecordingTitleGenerator()
+    agent = AgentService(
+        FakeLLM([final("first reply"), final("second reply")]),
+        store,
+        ContextBuilder("rules", "style"),
+        MemoryStore(tmp_path / "memory"),
+        tool_registry=ToolRegistry(),
+        title_generator=title_generator,
+    )
+
+    asyncio.run(collect(agent, session.session_id, "分析 session 持久化设计"))
+    asyncio.run(collect(agent, session.session_id, "继续"))
+
+    assert title_generator.calls == ["分析 session 持久化设计"]
+    assert store.load(session.session_id).title == "Session 持久化分析"
+
+
+def test_title_generation_runs_in_parallel_and_persists_after_turn_commit(tmp_path) -> None:
+    class GatedTitleGenerator:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def generate(self, _user_input):
+            self.started.set()
+            await self.release.wait()
+            return "并发标题生成"
+
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create()
+    title_generator = GatedTitleGenerator()
+    agent = AgentService(
+        FakeLLM([final("reply")]),
+        store,
+        ContextBuilder("rules", "style"),
+        MemoryStore(tmp_path / "memory"),
+        tool_registry=ToolRegistry(),
+        title_generator=title_generator,
+    )
+
+    async def scenario():
+        turn = asyncio.create_task(collect(agent, session.session_id, "first message"))
+        await title_generator.started.wait()
+        for _ in range(100):
+            if store.load(session.session_id).message_count == 2:
+                break
+            await asyncio.sleep(0)
+        assert store.load(session.session_id).message_count == 2
+        assert store.load(session.session_id).title == DEFAULT_SESSION_TITLE
+        assert not turn.done()
+        title_generator.release.set()
+        return await turn
+
+    events = asyncio.run(scenario())
+
+    assert events[-1].type == "turn_end"
+    assert store.load(session.session_id).title == "并发标题生成"
+
+
+def test_title_generation_skips_manual_titles_and_scheduled_turns(tmp_path) -> None:
+    class UnexpectedTitleGenerator:
+        async def generate(self, _user_input):
+            raise AssertionError("title generation should not run")
+
+    store = SessionStore(tmp_path / "sessions")
+    manual = store.create("Manual title")
+    scheduled = store.create()
+    agent = AgentService(
+        FakeLLM([final("manual"), final("scheduled")]),
+        store,
+        ContextBuilder("rules", "style"),
+        MemoryStore(tmp_path / "memory"),
+        tool_registry=ToolRegistry(),
+        title_generator=UnexpectedTitleGenerator(),
+    )
+
+    asyncio.run(collect(agent, manual.session_id, "first message"))
+
+    async def scheduled_turn():
+        return [
+            event
+            async for event in agent.run_turn(
+                scheduled.session_id,
+                "scheduled message",
+                source="scheduled_task",
+            )
+        ]
+
+    asyncio.run(scheduled_turn())
+
+    assert store.load(manual.session_id).title == "Manual title"
+    assert store.load(scheduled.session_id).title == DEFAULT_SESSION_TITLE
+
+
+def test_title_failure_does_not_change_successful_turn_status(tmp_path) -> None:
+    class FailedTitleGenerator:
+        async def generate(self, _user_input):
+            raise LLMError("title failed")
+
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create()
+    agent = AgentService(
+        FakeLLM([final("reply")]),
+        store,
+        ContextBuilder("rules", "style"),
+        MemoryStore(tmp_path / "memory"),
+        tool_registry=ToolRegistry(),
+        title_generator=FailedTitleGenerator(),
+    )
+
+    events = asyncio.run(collect(agent, session.session_id, "first message"))
+
+    assert events[-1].payload["status"] == "completed"
+    assert all(event.type != "error" for event in events)
+    assert store.load(session.session_id).title == DEFAULT_SESSION_TITLE
+
+
+def test_failed_first_turn_discards_generated_title(tmp_path) -> None:
+    class StaticTitleGenerator:
+        async def generate(self, _user_input):
+            return "不应保存的标题"
+
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create()
+    agent = AgentService(
+        FakeLLM([LLMError("main turn failed")]),
+        store,
+        ContextBuilder("rules", "style"),
+        MemoryStore(tmp_path / "memory"),
+        tool_registry=ToolRegistry(),
+        title_generator=StaticTitleGenerator(),
+    )
+
+    events = asyncio.run(collect(agent, session.session_id, "first message"))
+
+    assert events[-1].payload["status"] == "failed"
+    assert store.load(session.session_id).title == DEFAULT_SESSION_TITLE
 
 
 def test_agent_serializes_concurrent_turns_for_the_same_session(tmp_path) -> None:
@@ -190,6 +342,143 @@ def test_agent_executes_tool_and_persists_complete_protocol_turn(tmp_path) -> No
         "assistant",
     ]
     assert persisted[-1]["content"] == "Based on real observation."
+
+
+def test_agent_saves_memory_as_an_ordinary_tool_and_exposes_it_next_turn(tmp_path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    memories = MemoryStore(tmp_path / "memory")
+    registry = ToolRegistry()
+    register_memory_tools(registry, memories)
+    llm = FakeLLM(
+        [
+            calls(
+                ToolCall(
+                    "call_save",
+                    "save_memory",
+                    '{"content":"用户偏好中文回答。"}',
+                )
+            ),
+            final("我会记住。"),
+            final("我会继续使用中文。"),
+        ]
+    )
+    agent = AgentService(
+        llm,
+        store,
+        ContextBuilder("rules", "style"),
+        memories,
+        tool_registry=registry,
+    )
+    session = store.create()
+
+    first = asyncio.run(collect(agent, session.session_id, "以后用中文回答"))
+    asyncio.run(collect(agent, session.session_id, "你记得吗？"))
+
+    assert [event.type for event in first] == [
+        "turn_start",
+        "tool_call",
+        "tool_result",
+        "llm_delta",
+        "llm_message",
+        "turn_end",
+    ]
+    assert all(event.type != "approval_required" for event in first)
+    assert memories.list()[0].content == "用户偏好中文回答。"
+    assert "用户偏好中文回答。" not in llm.calls[1][0][0]["content"]
+    assert "用户偏好中文回答。" in llm.calls[2][0][0]["content"]
+
+
+def test_agent_deletes_memory_only_after_real_approval(tmp_path) -> None:
+    sessions = SessionStore(tmp_path / "sessions")
+    memories = MemoryStore(tmp_path / "memory")
+    saved = memories.add("已经过期的偏好")
+    registry = ToolRegistry()
+    register_memory_tools(registry, memories)
+    approval_store = ApprovalStore(tmp_path / "approvals")
+    approvals = ApprovalCoordinator(approval_store, timeout_seconds=1)
+    execution_store = ToolExecutionStore(tmp_path / "executions")
+    executions = ToolExecutionCoordinator(
+        execution_store,
+        approval_store,
+        sessions=sessions,
+    )
+    session = sessions.create()
+    agent = AgentService(
+        FakeLLM(
+            [
+                calls(
+                    ToolCall(
+                        "call_delete",
+                        "delete_memory",
+                        json.dumps({"memory_id": saved.memory_id}),
+                    )
+                ),
+                final("已删除。"),
+            ]
+        ),
+        sessions,
+        ContextBuilder("rules", "style"),
+        memories,
+        tool_registry=registry,
+        approval_policy=approvals,
+        tool_execution_coordinator=executions,
+    )
+
+    async def scenario():
+        events = []
+        async for event in agent.run_turn(session.session_id, "忘记这条偏好"):
+            events.append(event)
+            if event.type == "approval_required":
+                assert memories.list() == [saved]
+                approvals.resolve(event.payload["approvalId"], approved=True)
+        return events
+
+    events = asyncio.run(scenario())
+
+    assert memories.list() == []
+    assert [event.type for event in events[:5]] == [
+        "turn_start",
+        "tool_call",
+        "approval_required",
+        "approval_resolved",
+        "tool_result",
+    ]
+    assert execution_store.list()[0].status == "succeeded"
+
+
+def test_agent_keeps_memory_when_delete_approval_is_denied(tmp_path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    memories = MemoryStore(tmp_path / "memory")
+    saved = memories.add("仍然有效的偏好")
+    registry = ToolRegistry()
+    register_memory_tools(registry, memories)
+    agent = AgentService(
+        FakeLLM(
+            [
+                calls(
+                    ToolCall(
+                        "call_delete",
+                        "delete_memory",
+                        json.dumps({"memory_id": saved.memory_id}),
+                    )
+                ),
+                final("没有删除。"),
+            ]
+        ),
+        store,
+        ContextBuilder("rules", "style"),
+        memories,
+        tool_registry=registry,
+    )
+    session = store.create()
+
+    events = asyncio.run(collect(agent, session.session_id, "删除这条"))
+
+    assert memories.list() == [saved]
+    resolved = next(event for event in events if event.type == "approval_resolved")
+    assert resolved.payload["approved"] is False
+    result = next(event for event in events if event.type == "tool_result")
+    assert result.payload["ok"] is False
 
 
 def test_turn_budget_forces_one_tool_free_final_round(tmp_path) -> None:

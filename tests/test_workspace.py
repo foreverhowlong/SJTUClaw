@@ -9,6 +9,7 @@ from claw.shell import ShellManager
 from claw.store.approvals import ApprovalStore
 from claw.store.attachments import AttachmentStore
 from claw.store.downloads import DownloadStore
+from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
 from claw.tools.factory import SessionToolProvider
 from claw.tools.registry import ToolCall
@@ -64,7 +65,12 @@ def test_session_tools_require_approval_and_keep_attachment_scope(tmp_path) -> N
         "text/plain",
         BytesIO(b"secret"),
     )
-    registry = SessionToolProvider(attachments, downloads, shells).for_session(first)
+    registry = SessionToolProvider(
+        attachments,
+        downloads,
+        shells,
+        MemoryStore(tmp_path / "memory"),
+    ).for_session(first)
     assert registry.get("new_shell") is not None
     assert registry.get("restart_shell") is None
 
