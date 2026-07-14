@@ -21,7 +21,7 @@ class MemoryRecord:
 
 
 class MemoryStore:
-    """Persist each manually managed memory as one readable Markdown file."""
+    """Persist each global long-term memory as one readable Markdown file."""
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)

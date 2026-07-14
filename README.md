@@ -1,6 +1,6 @@
 # SJTUClaw
 
-SJTUClaw is a minimal agent runtime course project. The current implementation covers Step 9: persistent multi-session context, safe compaction, streamed OpenAI-compatible tool calling, a shared FastAPI Gateway with a React command center, persistent scheduled tasks, session-scoped workspace tools with explicit approval for side effects, and a turn-scoped skill system.
+SJTUClaw is a minimal agent runtime course project. The current implementation covers Step 9: persistent multi-session context, safe compaction, streamed OpenAI-compatible tool calling, a shared FastAPI Gateway with a React command center, persistent scheduled tasks, session-scoped workspace tools with explicit approval for side effects, model-callable long-term memory tools, automatic first-turn session titles, and a turn-scoped skill system.
 
 ## Setup
 
@@ -13,6 +13,14 @@ SJTUClaw is a minimal agent runtime course project. The current implementation c
 uv sync --dev
 ```
 
+5. Install the Web dependencies once:
+
+```bash
+cd web
+npm install
+cd ..
+```
+
 Example:
 
 ```env
@@ -22,6 +30,8 @@ LLM_MODEL=gpt-4.1-mini
 ```
 
 ## Run
+
+From the repository root, start the CLI with:
 
 ```bash
 uv run python -m claw.cli
@@ -52,11 +62,10 @@ Assistant> README.md describes a minimal agent runtime...
 
 ## Gateway and Web command center
 
-Build the browser interface once, then start the Gateway:
+From the repository root, build the browser interface and start the Gateway:
 
 ```bash
 cd web
-npm install
 npm run build
 cd ..
 uv run python -m gateway
@@ -99,6 +108,7 @@ The REST surface is intentionally small:
 - `GET /api/sessions/{sessionId}` returns persisted history.
 - `GET/POST /api/sessions/{sessionId}/attachments` lists or uploads attachments.
 - `GET/PUT /api/sessions/{sessionId}/workspace` reads or changes the session workspace.
+- `GET/POST /api/memories` lists or creates global long-term memories; `DELETE /api/memories/{memoryId}` deletes one by exact ID.
 - `GET /api/approvals` lists approval records; `POST /api/approvals/{approvalId}/resolve` approves or denies one pending request.
 - `GET /api/downloads/{downloadId}` returns an unexpired download snapshot.
 - `GET/POST /api/tasks` lists or creates persistent tasks.
@@ -193,16 +203,23 @@ including any tool calls and results, is committed as one revisioned record. Sta
 overwriting newer history. Invalid or corrupt files produce a visible error
 instead of being replaced silently.
 
+For a new session with the default title, the first non-scheduled user turn also
+starts a short title-generation call in parallel with the normal reply. The title
+is persisted only after that turn succeeds. A failed or empty title leaves `新会话`
+unchanged, and a manually assigned title is never overwritten.
+
 ## Stable context and memory
 
 Stable context is assembled before the current session history on every LLM request:
 
 1. `claw/prompts/system_prompt.md` defines runtime rules and behavior boundaries.
 2. `claw/prompts/soul.md` defines Claw's stable identity and interaction style.
-3. Manually managed memories provide long-term facts and preferences across sessions.
+3. Global memories provide long-term facts and preferences across sessions.
 4. The current session summary, when present, preserves compacted conversation state.
 
-System prompt and soul changes take effect after restarting the CLI. Memory commands are handled locally and are never sent to the LLM as user messages:
+System prompt and soul changes take effect after restarting the current CLI or
+Gateway process. Memory commands are handled locally and are never sent to the
+LLM as user messages:
 
 ```text
 /memory add <content>
@@ -210,7 +227,18 @@ System prompt and soul changes take effect after restarting the CLI. Memory comm
 /memory delete <memoryId>
 ```
 
-Each memory is stored as a readable Markdown file under `data/memory/`. Step 3 only supports explicit, manual memory updates; ordinary conversation cannot rewrite stable context.
+Each memory is stored as a readable Markdown file under `data/memory/`. In
+addition to the local CLI commands and the Web memory panel, the model can call:
+
+- `save_memory {"content":"..."}` to immediately persist one durable,
+  non-sensitive fact or preference without approval;
+- `delete_memory {"memory_id":"mem_..."}` to permanently delete one exact ID
+  after normal user approval.
+
+These are ordinary tools: they use the existing tool-call timeline and do not run
+an automatic reflection pass. There is no semantic deduplication, update, merge,
+or extra memory metadata. Memory context is snapshotted when a turn starts, so a
+memory written during a turn becomes visible to the model on later turns.
 
 ## Skills
 
@@ -292,6 +320,11 @@ The read-only catalog contains:
 
 `list_dir` and `read_file` resolve paths against the current session workspace,
 never against the Gateway process cwd or runtime data directory.
+
+The global `save_memory` and `delete_memory` tools are available even when the
+session has no workspace. Saving uses the `memory_write` safety level and does not
+require approval. Deleting is an `advanced` side effect and enters the same
+approval and execution-journal flow as other approved tools.
 
 Gateway turns also receive a session-scoped attachment reader when the
 `AttachmentStore` is available:
