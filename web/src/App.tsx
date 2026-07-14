@@ -23,6 +23,7 @@ import type {
   SessionSummary,
 } from "./types";
 import { useGatewaySocket } from "./useGatewaySocket";
+import { useMemories } from "./useMemories";
 import { useScheduledTasks } from "./useScheduledTasks";
 
 export default function App() {
@@ -39,6 +40,7 @@ export default function App() {
   const [rightOpen, setRightOpen] = useState(false);
   const reportTaskError = useCallback((message: string) => setError(message), []);
   const scheduled = useScheduledTasks(reportTaskError);
+  const memory = useMemories(reportTaskError);
 
   const refreshSessions = useCallback(async () => {
     const items = await listSessions();
@@ -377,12 +379,16 @@ export default function App() {
             activeSessionId={activeSessionId}
             tasks={scheduled.tasks}
             tasksLoading={scheduled.loading}
+            memories={memory.memories}
+            memoriesLoading={memory.loading}
             disabled={!activeSessionId}
             workspace={activeDetail?.workspace ?? null}
             onUpload={handleUpload}
             onSetWorkspace={handleSetWorkspace}
             onCreateTask={scheduled.create}
             onCancelTask={scheduled.cancel}
+            onAddMemory={memory.create}
+            onDeleteMemory={memory.remove}
             onClose={() => setRightOpen(false)}
           />
         </div>

@@ -1,6 +1,7 @@
 import type {
   AttachmentMetadata,
   CreateScheduledTaskInput,
+  MemoryRecord,
   ScheduledTask,
   SessionDetail,
   SessionSummary,
@@ -117,4 +118,21 @@ export function cancelScheduledTask(taskId: string): Promise<ScheduledTask> {
   return request<ScheduledTask>(`/api/tasks/${taskId}/cancel`, {
     method: "POST",
   });
+}
+
+export async function listMemories(): Promise<MemoryRecord[]> {
+  const body = await request<{ memories: MemoryRecord[] }>("/api/memories");
+  return body.memories;
+}
+
+export function createMemory(content: string): Promise<MemoryRecord> {
+  return request<MemoryRecord>("/api/memories", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+}
+
+export function deleteMemory(memoryId: string): Promise<void> {
+  return request<void>(`/api/memories/${memoryId}`, { method: "DELETE" });
 }

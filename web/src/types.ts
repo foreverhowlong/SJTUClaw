@@ -76,6 +76,11 @@ export interface AttachmentMetadata {
   uploadedAt: string;
 }
 
+export interface MemoryRecord {
+  memoryId: string;
+  content: string;
+}
+
 export type ScheduledTaskStatus =
   | "pending"
   | "running"

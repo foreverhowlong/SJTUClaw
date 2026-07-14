@@ -33,6 +33,9 @@ vi.mock("./api", () => ({
   listScheduledTasks: vi.fn().mockResolvedValue([]),
   createScheduledTask: vi.fn(),
   cancelScheduledTask: vi.fn(),
+  listMemories: vi.fn().mockResolvedValue([]),
+  createMemory: vi.fn(),
+  deleteMemory: vi.fn(),
 }));
 
 vi.mock("./useGatewaySocket", () => ({
@@ -96,7 +99,7 @@ describe("App session deletion", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "Only session" });
     expect(screen.queryByText("ACTIVITY")).toBeNull();
-    expect(screen.getByText("SESSION FILES")).toBeTruthy();
+    expect(screen.getByText("SESSION ATTACHMENTS")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Only session 的操作" }));
     await user.click(screen.getByRole("menuitem", { name: "DELETE" }));
     await user.click(screen.getByRole("button", { name: "DELETE SESSION" }));

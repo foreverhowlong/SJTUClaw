@@ -42,7 +42,7 @@ def build_read_only_registry(base_dir: str | Path | None = None) -> ToolRegistry
                         "type": "string",
                         "description": (
                             "Path to an existing directory; defaults to the current "
-                            "directory."
+                            "directory. Only relative paths are allowed."
                         ),
                     }
                 },
@@ -57,14 +57,15 @@ def build_read_only_registry(base_dir: str | Path | None = None) -> ToolRegistry
             description=(
                 "Read an existing UTF-8 text file without changing it. Fails for "
                 "missing, non-file, or non-UTF-8 paths. Content beyond 64 KiB is "
-                "truncated."
+                "truncated. Returns text to the model for reasoning; it does not "
+                "create a user-visible download."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Path to an existing UTF-8 text file.",
+                        "description": "Path to an existing UTF-8 text file. Only relative paths are allowed.",
                     }
                 },
                 "required": ["path"],
@@ -120,7 +121,8 @@ def build_workspace_read_only_registry(workspace: Workspace | None) -> ToolRegis
             description=(
                 "Read an existing UTF-8 text file in the current workspace. Fails "
                 "for missing, non-file, or non-UTF-8 paths. Content beyond 64 KiB "
-                "is truncated."
+                "is truncated. Returns text to the model for reasoning; it does not "
+                "create a user-visible download."
             ),
             input_schema={
                 "type": "object",

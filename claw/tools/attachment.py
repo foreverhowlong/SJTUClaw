@@ -20,7 +20,8 @@ def build_read_attachment_tool(
             "Read one uploaded UTF-8 text attachment from the current session by "
             "attachment_id. Use this instead of read_file for session attachments. "
             "Binary or non-UTF-8 attachments cannot be read as text, and content "
-            "beyond 64 KiB is truncated."
+            "beyond 64 KiB is truncated. Returns text to the model for reasoning; "
+            "it does not create a user-visible download."
         ),
         input_schema={
             "type": "object",

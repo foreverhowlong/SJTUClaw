@@ -1,3 +1,4 @@
+from claw.context import ContextBuilder
 from claw.shell import ShellManager
 from claw.store.attachments import AttachmentStore
 from claw.store.downloads import DownloadStore
@@ -20,6 +21,10 @@ def test_session_tool_catalog_exposes_planning_constraints(tmp_path) -> None:
     }
 
     assert "64 KiB" in definitions["read_file"]["description"]
+    assert (
+        "does not create a user-visible download"
+        in definitions["read_file"]["description"]
+    )
     assert "must not already exist" in definitions["create_file"]["description"]
     assert "entire contents" in definitions["overwrite_file"]["description"]
     assert "occurs more than once" in definitions["edit_file"]["description"]
@@ -32,6 +37,10 @@ def test_session_tool_catalog_exposes_planning_constraints(tmp_path) -> None:
     assert "defaults to the workspace root" in definitions["restart_shell"]["description"]
     assert "persist across calls" in definitions["run_command"]["description"]
     assert "64 KiB" in definitions["read_attachment"]["description"]
+    assert (
+        "does not create a user-visible download"
+        in definitions["read_attachment"]["description"]
+    )
 
     for name in (
         "list_dir",
@@ -44,3 +53,12 @@ def test_session_tool_catalog_exposes_planning_constraints(tmp_path) -> None:
     ):
         path_schema = definitions[name]["parameters"]["properties"]["path"]
         assert "Workspace-relative" in path_schema["description"]
+
+
+def test_default_system_prompt_explains_tool_results_are_not_user_delivery() -> None:
+    system_message = ContextBuilder.from_files().build([])[0]["content"]
+
+    assert "Tool results are internal observations" in system_message
+    assert "include the relevant content or a clear summary" in system_message
+    assert "use create_download when available" in system_message
+    assert "merely because a read tool succeeded" in system_message

@@ -22,6 +22,7 @@ from claw.errors import (
     ApprovalError,
     ClawError,
     DownloadError,
+    MemoryError,
     SessionError,
     TaskConflictError,
     TaskError,
@@ -36,6 +37,7 @@ from gateway.realtime import GatewayConnection, GatewayConnectionHub
 from gateway.task_routes import router as task_router
 from gateway.approval_routes import router as approval_router
 from gateway.download_routes import router as download_router
+from gateway.memory_routes import router as memory_router
 from gateway.workspace_routes import router as workspace_router
 
 
@@ -108,6 +110,11 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
     async def handle_download_error(_request: Request, exc: DownloadError):
         status = 404 if "不存在" in str(exc) or "过期" in str(exc) else 400
         return _error_response(status, "download_error", str(exc))
+
+    @app.exception_handler(MemoryError)
+    async def handle_memory_error(_request: Request, exc: MemoryError):
+        status = 404 if "不存在" in str(exc) else 400
+        return _error_response(status, "memory_error", str(exc))
 
     @app.exception_handler(TaskNotFoundError)
     async def handle_task_not_found(_request: Request, exc: TaskNotFoundError):
@@ -256,6 +263,7 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
             _connection_hub(websocket.app).disconnect(connection)
 
     app.include_router(task_router)
+    app.include_router(memory_router)
     app.include_router(workspace_router)
     app.include_router(approval_router)
     app.include_router(download_router)

@@ -389,6 +389,34 @@ def test_attachment_api_is_session_scoped_and_reports_limit(tmp_path) -> None:
     assert oversized.status_code == 413
 
 
+def test_memory_api_manages_the_shared_global_store(tmp_path) -> None:
+    runtime = make_runtime(tmp_path)
+
+    with TestClient(create_app(runtime)) as client:
+        empty = client.get("/api/memories")
+        invalid = client.post("/api/memories", json={"content": "   "})
+        created = client.post(
+            "/api/memories",
+            json={"content": "  Prefer concise technical explanations.  "},
+        )
+        memory_id = created.json()["memoryId"]
+        listed = client.get("/api/memories")
+        deleted = client.delete(f"/api/memories/{memory_id}")
+        missing = client.delete(f"/api/memories/{memory_id}")
+        malformed = client.delete("/api/memories/not-a-memory-id")
+
+    assert empty.json() == {"memories": []}
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["code"] == "memory_error"
+    assert created.status_code == 201
+    assert created.json()["content"] == "Prefer concise technical explanations."
+    assert listed.json() == {"memories": [created.json()]}
+    assert deleted.status_code == 204
+    assert missing.status_code == 404
+    assert malformed.status_code == 400
+    assert runtime.memory_store.list() == []
+
+
 def test_task_api_creates_lists_reads_and_cancels_persisted_task(tmp_path) -> None:
     runtime = make_runtime(tmp_path)
     session = runtime.session_store.create("Scheduled work")

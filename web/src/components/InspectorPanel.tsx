@@ -1,12 +1,37 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   AttachmentMetadata,
   CreateScheduledTaskInput,
+  MemoryRecord,
   ScheduledTask,
   SessionSummary,
 } from "../types";
 import { ScheduledTasksPanel } from "./ScheduledTasksPanel";
+import { MemoryPanel } from "./MemoryPanel";
+
+type InspectorSection = "files" | "memory" | "tasks" | "workspace";
+
+const SECTION_GROUPS: Array<{
+  label: string;
+  items: Array<{ id: InspectorSection; label: string }>;
+}> = [
+  {
+    label: "SESSION",
+    items: [
+      { id: "files", label: "FILES" },
+      { id: "workspace", label: "WORKSPACE" },
+    ],
+  },
+  {
+    label: "AGENT",
+    items: [{ id: "memory", label: "MEMORY" }],
+  },
+  {
+    label: "AUTOMATION",
+    items: [{ id: "tasks", label: "TASKS" }],
+  },
+];
 
 interface Props {
   className?: string;
@@ -15,12 +40,16 @@ interface Props {
   activeSessionId: string | null;
   tasks: ScheduledTask[];
   tasksLoading: boolean;
+  memories: MemoryRecord[];
+  memoriesLoading: boolean;
   disabled: boolean;
   workspace: string | null;
   onUpload: (file: File) => Promise<void>;
   onSetWorkspace: (path: string | null) => Promise<void>;
   onCreateTask: (input: CreateScheduledTaskInput) => Promise<unknown>;
   onCancelTask: (taskId: string) => Promise<unknown>;
+  onAddMemory: (content: string) => Promise<unknown>;
+  onDeleteMemory: (memoryId: string) => Promise<unknown>;
   onClose: () => void;
 }
 
@@ -31,20 +60,50 @@ export function InspectorPanel({
   activeSessionId,
   tasks,
   tasksLoading,
+  memories,
+  memoriesLoading,
   disabled,
   workspace,
   onUpload,
   onSetWorkspace,
   onCreateTask,
   onCancelTask,
+  onAddMemory,
+  onDeleteMemory,
   onClose,
 }: Props) {
   const [uploading, setUploading] = useState(false);
-  const [tab, setTab] = useState<"files" | "tasks" | "workspace">("files");
+  const [section, setSection] = useState<InspectorSection>("files");
+  const [selectorOpen, setSelectorOpen] = useState(false);
   const [workspaceDraft, setWorkspaceDraft] = useState(workspace ?? "");
   const inputRef = useRef<HTMLInputElement>(null);
+  const selectorRef = useRef<HTMLDivElement>(null);
+  const selectorButtonRef = useRef<HTMLButtonElement>(null);
+
+  const sectionMetadata = useMemo<Record<InspectorSection, string>>(
+    () => ({
+      files: String(attachments.length),
+      memory: String(memories.length),
+      tasks: String(tasks.length),
+      workspace: workspace ? "SET" : "NOT SET",
+    }),
+    [attachments.length, memories.length, tasks.length, workspace],
+  );
+  const activeSection = SECTION_GROUPS.flatMap((group) =>
+    group.items.map((item) => ({ ...item, group: group.label })),
+  ).find((item) => item.id === section)!;
 
   useEffect(() => setWorkspaceDraft(workspace ?? ""), [workspace]);
+  useEffect(() => {
+    if (!selectorOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!selectorRef.current?.contains(event.target as Node)) {
+        setSelectorOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () => window.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [selectorOpen]);
 
   const selectFile = async (file?: File) => {
     if (!file) return;
@@ -61,8 +120,8 @@ export function InspectorPanel({
     <aside className={`inspector drawer-panel ${className}`}>
       <div className="inspector-topline">
         <div className="inspector-title">
-          <span className="micro-label">{tab === "files" ? "SESSION FILES" : tab === "tasks" ? "TASKS" : "WORKSPACE"}</span>
-          <span className="file-count">{tab === "files" ? attachments.length : tab === "tasks" ? tasks.length : workspace ? 1 : 0}</span>
+          <span className="micro-label">INSPECTOR</span>
+          <span className="file-count">{SECTION_GROUPS.flatMap((group) => group.items).length}</span>
         </div>
         <button className="drawer-close" type="button" onClick={onClose} aria-label="关闭">
           ×
@@ -70,33 +129,70 @@ export function InspectorPanel({
       </div>
 
       <div className="inspector-body">
-        <div className="inspector-tabs" role="tablist" aria-label="Inspector sections">
+        <div
+          className="inspector-selector"
+          ref={selectorRef}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && selectorOpen) {
+              setSelectorOpen(false);
+              selectorButtonRef.current?.focus();
+            }
+          }}
+        >
           <button
+            ref={selectorButtonRef}
+            className="inspector-selector-trigger"
             type="button"
-            role="tab"
-            aria-selected={tab === "files"}
-            onClick={() => setTab("files")}
+            aria-haspopup="listbox"
+            aria-expanded={selectorOpen}
+            aria-controls="inspector-section-menu"
+            aria-label="选择 Inspector 栏目"
+            onClick={() => setSelectorOpen((open) => !open)}
           >
-            FILES
+            <span className="inspector-selector-current">
+              <span className="micro-label">{activeSection.group}</span>
+              <strong>{activeSection.label}</strong>
+            </span>
+            <span className="inspector-selector-value">
+              {sectionMetadata[section]}
+            </span>
+            <span className="inspector-selector-chevron" aria-hidden="true">
+              {selectorOpen ? "⌃" : "⌄"}
+            </span>
           </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "tasks"}
-            onClick={() => setTab("tasks")}
-          >
-            TASKS
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "workspace"}
-            onClick={() => setTab("workspace")}
-          >
-            WORKSPACE
-          </button>
+          {selectorOpen && (
+            <div
+              className="inspector-selector-menu"
+              id="inspector-section-menu"
+              role="listbox"
+              aria-label="Inspector sections"
+            >
+              {SECTION_GROUPS.map((group) => (
+                <div className="inspector-selector-group" key={group.label}>
+                  <span className="micro-label">{group.label}</span>
+                  {group.items.map((item) => (
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={section === item.id}
+                      key={item.id}
+                      onClick={() => {
+                        setSection(item.id);
+                        setSelectorOpen(false);
+                        selectorButtonRef.current?.focus();
+                      }}
+                    >
+                      <span>{item.label}</span>
+                      <span>{sectionMetadata[item.id]}</span>
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-        {tab === "workspace" ? (
+        <div className="inspector-panel-content">
+        {section === "workspace" ? (
           <div className="files-panel workspace-panel">
             <span className="micro-label">SESSION WORKSPACE</span>
             <p className="muted-copy">当前：{workspace ?? "尚未设置"}</p>
@@ -126,7 +222,7 @@ export function InspectorPanel({
               </button>
             </div>
           </div>
-        ) : tab === "files" ? <div className="files-panel">
+        ) : section === "files" ? <div className="files-panel">
         <div className="files-intro">
           <span className="micro-label">SESSION ATTACHMENTS</span>
           <p>附件只属于当前 session，不会成为 workspace 文件。</p>
@@ -161,7 +257,14 @@ export function InspectorPanel({
             </article>
           ))}
         </div>
-        </div> : (
+        </div> : section === "memory" ? (
+          <MemoryPanel
+            memories={memories}
+            loading={memoriesLoading}
+            onCreate={onAddMemory}
+            onDelete={onDeleteMemory}
+          />
+        ) : (
           <ScheduledTasksPanel
             sessions={sessions}
             activeSessionId={activeSessionId}
@@ -171,6 +274,7 @@ export function InspectorPanel({
             onCancel={onCancelTask}
           />
         )}
+        </div>
       </div>
     </aside>
   );
