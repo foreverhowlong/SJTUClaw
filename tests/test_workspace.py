@@ -65,6 +65,8 @@ def test_session_tools_require_approval_and_keep_attachment_scope(tmp_path) -> N
         BytesIO(b"secret"),
     )
     registry = SessionToolProvider(attachments, downloads, shells).for_session(first)
+    assert registry.get("restart_shell") is not None
+    assert registry.get("new_shell") is None
 
     denied = run(
         registry,
@@ -99,26 +101,32 @@ def test_session_tools_require_approval_and_keep_attachment_scope(tmp_path) -> N
     assert record.blob_path.read_text() == "hello"
 
 
-def test_persistent_shell_keeps_environment_and_terminates_on_escape(tmp_path) -> None:
+def test_run_command_starts_shell_keeps_state_and_recovers_after_escape(tmp_path) -> None:
     async def scenario():
         project = tmp_path / "project"
         child = project / "child"
         child.mkdir(parents=True)
         workspace = Workspace.from_path(project)
         manager = ShellManager(timeout_seconds=2)
-        await manager.new_shell("session", workspace, project)
         first = await manager.run_command("session", workspace, "export CLAW_TEST=kept; cd child")
         second = await manager.run_command("session", workspace, 'printf "%s" "$CLAW_TEST"')
+        restarted = await manager.restart_shell("session", workspace, child.resolve())
         escaped = await manager.run_command("session", workspace, "cd ../..")
-        with pytest.raises(Exception, match="new_shell"):
-            await manager.run_command("session", workspace, "pwd")
+        recovered = await manager.run_command("session", workspace, "pwd")
         await manager.close_all()
-        return first, second, escaped
+        return first, second, restarted, escaped, recovered, str(project.resolve())
 
-    first, second, escaped = asyncio.run(scenario())
+    first, second, restarted, escaped, recovered, project_root = asyncio.run(scenario())
     assert first["success"] is True and first["cwd"].endswith("/child")
+    assert first["shellStarted"] is True
     assert second["stdout"] == "kept"
+    assert second["shellStarted"] is False
+    assert restarted["tool"] == "restart_shell"
+    assert restarted["cwd"].endswith("/child")
     assert escaped["success"] is False and "离开 workspace" in escaped["error"]
+    assert recovered["success"] is True
+    assert recovered["shellStarted"] is True
+    assert recovered["cwd"] == project_root
 
 
 def test_approval_coordinator_persists_and_wakes_waiter(tmp_path) -> None:

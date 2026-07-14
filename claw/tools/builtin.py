@@ -31,10 +31,21 @@ def build_read_only_registry(base_dir: str | Path | None = None) -> ToolRegistry
     registry.register(
         ToolDefinition(
             name="list_dir",
-            description="List the direct children of a directory without changing it.",
+            description=(
+                "List the direct children of an existing directory without changing "
+                "it. Optional path defaults to the current directory."
+            ),
             input_schema={
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Path to an existing directory; defaults to the current "
+                            "directory."
+                        ),
+                    }
+                },
                 "additionalProperties": False,
             },
             handler=lambda args: _list_dir(root, args),
@@ -43,10 +54,19 @@ def build_read_only_registry(base_dir: str | Path | None = None) -> ToolRegistry
     registry.register(
         ToolDefinition(
             name="read_file",
-            description="Read a UTF-8 text file without changing it.",
+            description=(
+                "Read an existing UTF-8 text file without changing it. Fails for "
+                "missing, non-file, or non-UTF-8 paths. Content beyond 64 KiB is "
+                "truncated."
+            ),
             input_schema={
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to an existing UTF-8 text file.",
+                    }
+                },
                 "required": ["path"],
                 "additionalProperties": False,
             },
@@ -74,10 +94,21 @@ def build_workspace_read_only_registry(workspace: Workspace | None) -> ToolRegis
     registry.register(
         ToolDefinition(
             name="list_dir",
-            description="List direct children of a directory in the current workspace.",
+            description=(
+                "List the direct children of an existing workspace directory. "
+                "Optional path defaults to the workspace root."
+            ),
             input_schema={
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Workspace-relative path to an existing directory; "
+                            "defaults to the workspace root."
+                        ),
+                    }
+                },
                 "additionalProperties": False,
             },
             handler=lambda args: _workspace_list(workspace, args),
@@ -86,10 +117,21 @@ def build_workspace_read_only_registry(workspace: Workspace | None) -> ToolRegis
     registry.register(
         ToolDefinition(
             name="read_file",
-            description="Read a UTF-8 text file inside the current workspace.",
+            description=(
+                "Read an existing UTF-8 text file in the current workspace. Fails "
+                "for missing, non-file, or non-UTF-8 paths. Content beyond 64 KiB "
+                "is truncated."
+            ),
             input_schema={
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Workspace-relative path to an existing UTF-8 text file."
+                        ),
+                    }
+                },
                 "required": ["path"],
                 "additionalProperties": False,
             },

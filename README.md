@@ -309,8 +309,9 @@ Step 8 adds these workspace capabilities:
 
 - `create_file`, `overwrite_file`, and exact-match `edit_file` use atomic writes;
 - `copy_attachment_to_workspace` can copy only a blob owned by the current session;
-- `new_shell` creates one persistent shell per session and `run_command` reuses its
-  cwd, environment, and sourced state;
+- `run_command` lazily creates one persistent shell per session and reuses its cwd,
+  environment, and sourced state; `restart_shell` explicitly resets that state or
+  selects a new starting directory;
 - `create_download` snapshots an existing workspace file into a short-lived
   runtime download and returns metadata rather than file contents to the model.
 

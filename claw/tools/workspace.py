@@ -24,23 +24,40 @@ def register_workspace_tools(
     definitions = [
         _update_definition(
             "create_file",
-            "Create a new UTF-8 file in the workspace.",
+            "Create a new UTF-8 file. The target must not already exist, and its "
+            "parent directory must exist. Use overwrite_file or edit_file for an "
+            "existing file.",
             lambda args: _create(_require(workspace), args),
         ),
         _update_definition(
             "overwrite_file",
-            "Overwrite an existing UTF-8 workspace file.",
+            "Replace the entire contents of an existing UTF-8 file. The target must "
+            "already exist. Use edit_file when only a specific portion should change.",
             lambda args: _overwrite(_require(workspace), args),
         ),
         ToolDefinition(
             "edit_file",
-            "Replace one exact text occurrence in an existing workspace file.",
+            "Replace exactly one occurrence of non-empty old_text in an existing "
+            "UTF-8 file. The call fails if old_text is absent or occurs more than once.",
             {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "old_text": {"type": "string"},
-                    "new_text": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Workspace-relative path to an existing UTF-8 file."
+                        ),
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": (
+                            "Non-empty text that must occur exactly once in the file."
+                        ),
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Replacement text; may be empty to delete.",
+                    },
                 },
                 "required": ["path", "old_text", "new_text"],
                 "additionalProperties": False,
@@ -51,12 +68,24 @@ def register_workspace_tools(
         ),
         ToolDefinition(
             "copy_attachment_to_workspace",
-            "Copy an attachment owned by this session into the workspace.",
+            "Copy an attachment owned by the current session into a new workspace "
+            "file, preserving its bytes. The target must not already exist, and its "
+            "parent directory must exist.",
             {
                 "type": "object",
                 "properties": {
-                    "attachment_id": {"type": "string"},
-                    "path": {"type": "string"},
+                    "attachment_id": {
+                        "type": "string",
+                        "description": (
+                            "ID of an attachment listed in the current session context."
+                        ),
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Workspace-relative destination path for a new file."
+                        ),
+                    },
                 },
                 "required": ["attachment_id", "path"],
                 "additionalProperties": False,
@@ -69,10 +98,19 @@ def register_workspace_tools(
         ),
         ToolDefinition(
             "create_download",
-            "Create a temporary Gateway download for an existing workspace file.",
+            f"Create a temporary {_duration_label(downloads.ttl_seconds)} Gateway "
+            "download snapshot of an existing regular workspace file. Later changes "
+            "to the workspace file do not update this download.",
             {
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Workspace-relative path to the existing file to snapshot."
+                        ),
+                    }
+                },
                 "required": ["path"],
                 "additionalProperties": False,
             },
@@ -91,8 +129,14 @@ def _update_definition(name: str, description: str, handler) -> ToolDefinition:
         {
             "type": "object",
             "properties": {
-                "path": {"type": "string"},
-                "content": {"type": "string"},
+                "path": {
+                    "type": "string",
+                    "description": "Workspace-relative target file path.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Complete UTF-8 content to write.",
+                },
             },
             "required": ["path", "content"],
             "additionalProperties": False,
@@ -101,6 +145,12 @@ def _update_definition(name: str, description: str, handler) -> ToolDefinition:
         safety_level="advanced",
         requires_approval=True,
     )
+
+
+def _duration_label(seconds: int) -> str:
+    if seconds % 60 == 0:
+        return f"{seconds // 60}-minute"
+    return f"{seconds}-second"
 
 
 def _require(workspace: Workspace | None) -> Workspace:

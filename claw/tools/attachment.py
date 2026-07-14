@@ -18,11 +18,20 @@ def build_read_attachment_tool(
         name=READ_ATTACHMENT_TOOL_NAME,
         description=(
             "Read one uploaded UTF-8 text attachment from the current session by "
-            "attachment_id. Use this instead of read_file for session attachments."
+            "attachment_id. Use this instead of read_file for session attachments. "
+            "Binary or non-UTF-8 attachments cannot be read as text, and content "
+            "beyond 64 KiB is truncated."
         ),
         input_schema={
             "type": "object",
-            "properties": {"attachment_id": {"type": "string"}},
+            "properties": {
+                "attachment_id": {
+                    "type": "string",
+                    "description": (
+                        "ID of an attachment listed in the current session context."
+                    ),
+                }
+            },
             "required": ["attachment_id"],
             "additionalProperties": False,
         },

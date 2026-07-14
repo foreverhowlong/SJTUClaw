@@ -30,13 +30,51 @@ class ShellManager:
         self.timeout_seconds = timeout_seconds
         self._shells: dict[str, ManagedShell] = {}
 
-    async def new_shell(
+    async def restart_shell(
         self,
         session_id: str,
         workspace: Workspace,
         cwd: Path,
     ) -> dict[str, object]:
         await self.close(session_id)
+        await self._start_shell(session_id, workspace, cwd)
+        return {
+            "success": True,
+            "tool": "restart_shell",
+            "cwd": str(cwd),
+            "message": "shell restarted",
+        }
+
+    async def ensure_shell(
+        self,
+        session_id: str,
+        workspace: Workspace,
+    ) -> tuple[ManagedShell, bool]:
+        shell = self._shells.get(session_id)
+        if shell is not None and shell.process.returncode is not None:
+            self._shells.pop(session_id, None)
+            shell = None
+        if shell is not None and (
+            shell.workspace.root != workspace.root
+            or not shell.cwd.is_relative_to(shell.workspace.root)
+        ):
+            await self.close(session_id)
+            shell = None
+        if shell is None:
+            shell = await self._start_shell(
+                session_id,
+                workspace,
+                workspace.root,
+            )
+            return shell, True
+        return shell, False
+
+    async def _start_shell(
+        self,
+        session_id: str,
+        workspace: Workspace,
+        cwd: Path,
+    ) -> ManagedShell:
         shell = os.environ.get("SHELL", "/bin/sh")
         try:
             process = await asyncio.create_subprocess_exec(
@@ -48,13 +86,9 @@ class ShellManager:
             )
         except OSError as exc:
             raise ShellError(f"启动 shell 失败: {exc}") from exc
-        self._shells[session_id] = ManagedShell(process, workspace, cwd)
-        return {
-            "success": True,
-            "tool": "new_shell",
-            "cwd": str(cwd),
-            "message": "shell started",
-        }
+        managed = ManagedShell(process, workspace, cwd)
+        self._shells[session_id] = managed
+        return managed
 
     async def run_command(
         self,
@@ -62,16 +96,7 @@ class ShellManager:
         workspace: Workspace,
         command: str,
     ) -> dict[str, object]:
-        shell = self._shells.get(session_id)
-        if shell is None or shell.process.returncode is not None:
-            self._shells.pop(session_id, None)
-            raise ShellError("当前 session 没有可用 shell，请先调用 new_shell。")
-        if shell.workspace.root != workspace.root:
-            await self.close(session_id)
-            raise ShellError("session workspace 已改变，旧 shell 已终止，请调用 new_shell。")
-        if not shell.cwd.is_relative_to(shell.workspace.root):
-            await self.close(session_id)
-            raise ShellError("shell 当前目录已离开 workspace，已终止。")
+        shell, shell_started = await self.ensure_shell(session_id, workspace)
 
         async with shell.lock:
             marker = f"__CLAW_{uuid4().hex}__"
@@ -109,6 +134,7 @@ class ShellManager:
                     "stderr": "",
                     "timedOut": True,
                     "truncated": False,
+                    "shellStarted": shell_started,
                     "error": "命令执行超时，shell 已终止。",
                 }
             except (EOFError, UnicodeError, ValueError) as exc:
@@ -131,6 +157,7 @@ class ShellManager:
                 "stderr": stderr,
                 "timedOut": False,
                 "truncated": truncated,
+                "shellStarted": shell_started,
                 "error": (
                     "shell 离开 workspace，已终止。"
                     if escaped
