@@ -25,6 +25,26 @@ export interface SessionDetail extends SessionSummary {
   timeline: PersistedTimelineItem[];
 }
 
+export type CompactionStatus =
+  | "compacted"
+  | "skipped"
+  | "failed"
+  | "unavailable";
+
+export interface CompactionResult {
+  sessionId: string;
+  status: CompactionStatus;
+  oldMessageCount: number;
+  recentMessageCount: number;
+  summary: string;
+  detail: string;
+}
+
+export interface CompactionResponse {
+  result: CompactionResult;
+  session: SessionDetail;
+}
+
 export interface TextTimelineItem {
   type: "user_message" | "assistant_message" | "working_note";
   content: string;
@@ -183,7 +203,7 @@ export type GatewayMessage =
   | {
       type: "session_updated";
       sessionId: string;
-      reason: "scheduled_task";
+      reason: "scheduled_task" | "compaction";
     };
 
 export interface SessionRunState {

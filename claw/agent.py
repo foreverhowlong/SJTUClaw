@@ -10,35 +10,37 @@ from typing import Protocol
 
 from claw.approval import ApprovalPolicy, DenyAllPolicy
 from claw.compaction import CompactionResult, Compactor, serialized_request_chars
-from claw.context import ContextBuilder, TOOL_RESULT_PREVIEW_CHARS
-from claw.errors import (
-    ApprovalError,
-    DownloadError,
-    LLMError,
-    SessionError,
-    ShellError,
-    SkillError,
-    ToolError,
-    WorkspaceError,
-)
+from claw.context import ContextBuilder
+from claw.errors import LLMError, ToolError
 from claw.events import AgentEvent
 from claw.llm import LLMStreamEvent
 from claw.messages import Message, MessageSource, TextMessage
 from claw.session import Session
+from claw.session_coordination import SessionCoordinator
 from claw.skills import SkillRegistry, SkillRequest
 from claw.skills.turn import SkillTurn
 from claw.store.attachments import AttachmentStore
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
-from claw.tools import ToolCall, ToolRegistry, ToolResult, build_read_only_registry
+from claw.tools import ToolRegistry, build_read_only_registry
 from claw.tools.factory import SessionToolProvider
+from claw.tool_execution import ToolExecutionCoordinator
+from claw.tool_loop import ToolLoopRunner
+from claw.turn_context import TurnContextSnapshot
+from claw.turn_limits import TurnBudget, TurnLimits
+from claw.turn_protocol import (
+    assistant_tool_message,
+    commit_interrupted_tool_turn,
+    public_error,
+    tool_call_ids,
+    tool_result_event_payload,
+    tool_result_message,
+    turn_budget_result,
+)
 from claw.tools.attachment import (
     READ_ATTACHMENT_TOOL_NAME,
     build_read_attachment_tool,
 )
-
-
-MAX_TOOL_CALLS_PER_BATCH = 5
 
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,9 @@ class AgentService:
         attachment_store: AttachmentStore | None = None,
         tool_provider: SessionToolProvider | None = None,
         skill_registry: SkillRegistry | None = None,
+        turn_limits: TurnLimits | None = None,
+        session_coordinator: SessionCoordinator | None = None,
+        tool_execution_coordinator: ToolExecutionCoordinator | None = None,
     ) -> None:
         self._llm = llm
         self._store = store
@@ -78,7 +83,13 @@ class AgentService:
         self._attachment_store = attachment_store
         self._tool_provider = tool_provider
         self._skill_registry = skill_registry
-        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._turn_limits = turn_limits or TurnLimits()
+        self._session_coordinator = session_coordinator or SessionCoordinator(store.root)
+        self._tool_execution_coordinator = tool_execution_coordinator
+        self._tool_loop = ToolLoopRunner(
+            self._approval_policy,
+            tool_execution_coordinator,
+        )
 
     async def run_turn(
         self,
@@ -92,7 +103,7 @@ class AgentService:
         if not user_input.strip():
             raise ValueError("user_input 不能为空。")
 
-        async with self._session_lock(session_id):
+        async with self._session_coordinator.turn(session_id):
             async for event in self._run_turn(
                 session_id, user_input, source, skill_request
             ):
@@ -116,9 +127,10 @@ class AgentService:
                 user_message["source"] = source
             working = [user_message]
             snapshot = self._store.load(session_id)
-            if self._skill_registry is not None:
+            turn_context = self._capture_turn_context(session_id)
+            if turn_context.skills is not None:
                 skill_turn = SkillTurn(
-                    self._skill_registry.snapshot(),
+                    turn_context.skills,
                     user_input,
                     allow_auto=source != "scheduled_task" and skill_request is None,
                 )
@@ -135,7 +147,7 @@ class AgentService:
             definitions = tools.definitions()
             if self._compactor is not None:
                 request_chars = self._request_chars(
-                    session_id, snapshot, working, definitions, skill_turn
+                    snapshot, working, definitions, turn_context, skill_turn
                 )
                 if self._compactor.should_compact(request_chars):
                     yield AgentEvent(
@@ -150,10 +162,10 @@ class AgentService:
                     yield AgentEvent("compaction_done", session_id, asdict(result))
                     snapshot = self._store.load(session_id)
                     remaining_chars = self._request_chars(
-                        session_id,
                         snapshot,
                         working,
                         definitions,
+                        turn_context,
                         skill_turn,
                     )
                     if self._compactor.should_compact(remaining_chars):
@@ -174,12 +186,13 @@ class AgentService:
                 working,
                 definitions,
                 tools,
+                turn_context,
                 skill_turn,
             ):
                 yield event
             yield AgentEvent("turn_end", session_id, {"status": "completed"})
         except asyncio.CancelledError:
-            _commit_interrupted_tool_turn(
+            committed = commit_interrupted_tool_turn(
                 self._store,
                 session_id,
                 snapshot,
@@ -188,11 +201,12 @@ class AgentService:
                 skill_turn=skill_turn,
                 outcome="interrupted",
             )
+            self._mark_executions_recorded(session_id, working, committed)
             raise
         except Exception as exc:
             logger.exception("agent turn failed: session=%s", session_id)
-            code, message = _public_error(exc)
-            _commit_interrupted_tool_turn(
+            code, message = public_error(exc)
+            committed = commit_interrupted_tool_turn(
                 self._store,
                 session_id,
                 snapshot,
@@ -201,6 +215,7 @@ class AgentService:
                 skill_turn=skill_turn,
                 outcome="failed",
             )
+            self._mark_executions_recorded(session_id, working, committed)
             yield AgentEvent(
                 "error",
                 session_id,
@@ -210,21 +225,16 @@ class AgentService:
 
     def _build_context(
         self,
-        session_id: str,
         snapshot: Session,
         working: list[Message],
+        turn_context: TurnContextSnapshot,
         skill_turn: SkillTurn | None = None,
     ) -> list[Message]:
-        attachments = (
-            self._attachment_store.list(session_id)
-            if self._attachment_store is not None
-            else ()
-        )
         arguments = (
             [*snapshot.messages, *working],
-            self._memory_store.list(),
+            turn_context.memories,
             snapshot.summary,
-            attachments,
+            turn_context.attachments,
         )
         kwargs = {"skills": skill_turn.context() if skill_turn is not None else None}
         if self._tool_provider is None:
@@ -235,14 +245,29 @@ class AgentService:
 
     def _request_chars(
         self,
-        session_id: str,
         snapshot: Session,
         working: list[Message],
         definitions: list[dict],
+        turn_context: TurnContextSnapshot,
         skill_turn: SkillTurn | None = None,
     ) -> int:
-        messages = self._build_context(session_id, snapshot, working, skill_turn)
+        messages = self._build_context(snapshot, working, turn_context, skill_turn)
         return serialized_request_chars(messages, definitions)
+
+    def _capture_turn_context(self, session_id: str) -> TurnContextSnapshot:
+        return TurnContextSnapshot(
+            memories=tuple(self._memory_store.list()),
+            attachments=(
+                tuple(self._attachment_store.list(session_id))
+                if self._attachment_store is not None
+                else ()
+            ),
+            skills=(
+                self._skill_registry.snapshot()
+                if self._skill_registry is not None
+                else None
+            ),
+        )
 
     def _tools_for_session(self, session: Session) -> ToolRegistry:
         if self._tool_provider is not None:
@@ -264,12 +289,31 @@ class AgentService:
         working: list[Message],
         definitions: list[dict],
         tools: ToolRegistry,
+        turn_context: TurnContextSnapshot,
         skill_turn: SkillTurn | None,
     ) -> AsyncIterator[AgentEvent]:
+        budget = TurnBudget(self._turn_limits)
+        force_final = False
+        budget_warning_emitted = False
         while True:
-            messages = self._build_context(session_id, snapshot, working, skill_turn)
+            if not force_final and not budget.record_llm_round():
+                force_final = True
+            if force_final and not budget_warning_emitted:
+                budget_warning_emitted = True
+                yield AgentEvent(
+                    "warning",
+                    session_id,
+                    {
+                        "code": "turn_budget_exhausted",
+                        "message": "本轮达到模型或工具调用预算，将停止调用工具并生成最终回复。",
+                        "llmRounds": budget.llm_rounds,
+                        "toolCalls": budget.tool_calls,
+                    },
+                )
+            messages = self._build_context(snapshot, working, turn_context, skill_turn)
             completion = None
-            async for llm_event in self._llm.stream_chat(messages, definitions):
+            active_definitions = [] if force_final else definitions
+            async for llm_event in self._llm.stream_chat(messages, active_definitions):
                 if llm_event.type == "text_delta":
                     yield AgentEvent(
                         "llm_delta",
@@ -282,18 +326,41 @@ class AgentService:
                 raise LLMError("LLM stream 未返回 completed 事件。")
 
             if completion.tool_calls:
+                if force_final:
+                    raise LLMError("LLM 在禁用 tools 的最终回复阶段仍返回 tool calls。")
                 working.append(
-                    _assistant_tool_message(completion.content, completion.tool_calls)
+                    assistant_tool_message(completion.content, completion.tool_calls)
                 )
-                async for event in self._run_tool_batch(
-                    session_id,
-                    working,
-                    completion.tool_calls,
-                    tools,
-                    workspace=snapshot.workspace,
-                    skill_turn=skill_turn,
-                ):
-                    yield event
+                accepted = budget.accept_tool_batch(len(completion.tool_calls))
+                if accepted:
+                    async for event in self._tool_loop.run_batch(
+                        session_id,
+                        working,
+                        completion.tool_calls,
+                        tools,
+                        workspace=snapshot.workspace,
+                        skill_turn=skill_turn,
+                    ):
+                        yield event
+                else:
+                    for call in completion.tool_calls:
+                        yield AgentEvent(
+                            "tool_call",
+                            session_id,
+                            {
+                                "callId": call.call_id,
+                                "name": call.name,
+                                "arguments": call.arguments,
+                            },
+                        )
+                        result = turn_budget_result(call)
+                        working.append(tool_result_message(result))
+                        yield AgentEvent(
+                            "tool_result",
+                            session_id,
+                            tool_result_event_payload(result),
+                        )
+                    force_final = True
                 continue
 
             final = completion.content.strip()
@@ -310,125 +377,21 @@ class AgentService:
                     else None
                 ),
             )
+            self._mark_executions_recorded(session_id, working, True)
             yield AgentEvent("llm_message", session_id, {"content": final})
             return
 
-    async def _run_tool_batch(
+    def _mark_executions_recorded(
         self,
         session_id: str,
         working: list[Message],
-        calls: tuple[ToolCall, ...],
-        tools: ToolRegistry,
-        *,
-        workspace: str | None,
-        skill_turn: SkillTurn | None,
-    ) -> AsyncIterator[AgentEvent]:
-        oversized = len(calls) > MAX_TOOL_CALLS_PER_BATCH
-        for call in calls:
-            async for event in self._run_tool_call(
+        committed: bool,
+    ) -> None:
+        if committed and self._tool_execution_coordinator is not None:
+            self._tool_execution_coordinator.mark_turn_committed(
                 session_id,
-                working,
-                call,
-                tools,
-                oversized=oversized,
-                workspace=workspace,
-                skill_turn=skill_turn,
-            ):
-                yield event
-
-    async def _run_tool_call(
-        self,
-        session_id: str,
-        working: list[Message],
-        call: ToolCall,
-        tools: ToolRegistry,
-        *,
-        oversized: bool,
-        workspace: str | None,
-        skill_turn: SkillTurn | None,
-    ) -> AsyncIterator[AgentEvent]:
-        yield AgentEvent(
-            "tool_call",
-            session_id,
-            {
-                "callId": call.call_id,
-                "name": call.name,
-                "arguments": call.arguments,
-            },
-        )
-        if oversized:
-            result = _batch_limit_result(call)
-            working.append(_tool_result_message(result))
-            yield AgentEvent(
-                "tool_result",
-                session_id,
-                _tool_result_event_payload(result),
+                tool_call_ids(working),
             )
-            return
-
-        prepared, preparation_error = tools.prepare(call)
-        if preparation_error is not None:
-            result = preparation_error
-        elif prepared is not None and not prepared.tool.requires_approval:
-            result = await tools.execute_prepared(prepared)
-        else:
-            assert prepared is not None
-            request = self._approval_policy.create(
-                session_id,
-                prepared,
-                workspace,
-            )
-            yield AgentEvent(
-                "approval_required",
-                session_id,
-                {
-                    "approvalId": request.approval_id,
-                    "callId": call.call_id,
-                    "name": call.name,
-                    "arguments": prepared.arguments,
-                    "workspace": workspace,
-                },
-            )
-            decision = await self._approval_policy.wait(request.approval_id)
-            yield AgentEvent(
-                "approval_resolved",
-                session_id,
-                {
-                    "callId": call.call_id,
-                    "name": call.name,
-                    "approvalId": request.approval_id,
-                    "approved": decision.approved,
-                    "reason": decision.reason,
-                },
-            )
-            if decision.approved:
-                self._approval_policy.record_execution_started(request.approval_id)
-                result = await tools.execute_prepared(prepared, approved=True)
-                self._approval_policy.record_execution_result(
-                    request.approval_id,
-                    result,
-                )
-            else:
-                result = ToolResult(
-                    call.call_id,
-                    call.name,
-                    False,
-                    error=(
-                        f"用户拒绝执行（approvalId={request.approval_id}）: "
-                        f"{decision.reason or '未提供原因'}"
-                    ),
-                )
-
-        working.append(_tool_result_message(result))
-        yield AgentEvent(
-            "tool_result",
-            session_id,
-            _tool_result_event_payload(result),
-        )
-        if skill_turn is not None:
-            selected = skill_turn.consume_selection_event()
-            if selected is not None:
-                yield AgentEvent("skill_selected", session_id, selected)
 
     async def compact_session(
         self,
@@ -436,7 +399,7 @@ class AgentService:
         *,
         force: bool = True,
     ) -> CompactionResult:
-        async with self._session_lock(session_id):
+        async with self._session_coordinator.turn(session_id):
             if self._compactor is None:
                 snapshot = self._store.load(session_id)
                 return CompactionResult(
@@ -448,127 +411,3 @@ class AgentService:
                     detail="runtime 未配置 compactor，旧消息未删除。",
                 )
             return await self._compactor.compact(session_id, force=force)
-
-    def _session_lock(self, session_id: str) -> asyncio.Lock:
-        return self._session_locks.setdefault(session_id, asyncio.Lock())
-
-
-def _assistant_tool_message(
-    content: str,
-    calls: tuple[ToolCall, ...],
-) -> Message:
-    return {
-        "role": "assistant",
-        "content": content or None,
-        "tool_calls": [
-            {
-                "id": call.call_id,
-                "type": "function",
-                "function": {
-                    "name": call.name,
-                    "arguments": call.arguments,
-                },
-            }
-            for call in calls
-        ],
-    }
-
-
-def _tool_result_message(result: ToolResult) -> Message:
-    return {
-        "role": "tool",
-        "tool_call_id": result.call_id,
-        "name": result.name,
-        "content": result.model_content(),
-    }
-
-
-def _batch_limit_result(call: ToolCall) -> ToolResult:
-    return ToolResult(
-        call.call_id,
-        call.name,
-        False,
-        error=(
-            f"一次最多请求 {MAX_TOOL_CALLS_PER_BATCH} 个 tool calls，"
-            "本批未执行。"
-        ),
-    )
-
-
-def _tool_result_event_payload(result: ToolResult) -> dict:
-    content = result.model_content()
-    payload = {
-        "callId": result.call_id,
-        "name": result.name,
-        "ok": result.ok,
-        "result": result.value,
-        "error": result.error,
-        "truncated": False,
-    }
-    if len(content) > TOOL_RESULT_PREVIEW_CHARS:
-        payload.update(
-            {
-                "result": None,
-                "error": "",
-                "truncated": True,
-                "originalCharacters": len(content),
-                "preview": content[:TOOL_RESULT_PREVIEW_CHARS],
-            }
-        )
-    return payload
-
-
-def _public_error(exc: Exception) -> tuple[str, str]:
-    if isinstance(exc, LLMError):
-        return "llm_error", "LLM 调用失败，请稍后重试。"
-    if isinstance(exc, SessionError):
-        return "session_error", "会话状态处理失败。"
-    if isinstance(
-        exc,
-        (ToolError, WorkspaceError, ApprovalError, DownloadError, ShellError),
-    ):
-        return "tool_error", "工具运行时发生错误。"
-    if isinstance(exc, SkillError):
-        return "skill_error", str(exc)
-    return "internal_error", "Agent 运行时发生内部错误。"
-
-
-def _commit_interrupted_tool_turn(
-    store: SessionStore,
-    session_id: str,
-    snapshot: Session | None,
-    working: list[Message],
-    message: str,
-    *,
-    skill_turn: SkillTurn | None = None,
-    outcome: str = "failed",
-) -> None:
-    """Best-effort close a protocol-complete tool turn after later failure."""
-    if snapshot is None or (
-        not any(item.get("role") == "tool" for item in working)
-        and (skill_turn is None or skill_turn.selection is None)
-    ):
-        return
-    messages = list(working)
-    if not (
-        messages
-        and messages[-1].get("role") == "assistant"
-        and "tool_calls" not in messages[-1]
-    ):
-        messages.append({"role": "assistant", "content": message})
-    try:
-        store.commit_turn(
-            session_id,
-            expected_revision=snapshot.revision,
-            messages=messages,
-            skill_usage=(
-                skill_turn.usage(session_id, outcome, messages[-1]["content"])
-                if skill_turn is not None
-                else None
-            ),
-        )
-    except Exception:
-        logger.exception(
-            "failed to preserve interrupted tool turn: session=%s",
-            session_id,
-        )

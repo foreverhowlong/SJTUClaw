@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { EMPTY_RUN } from "../state";
@@ -40,6 +41,40 @@ const completedTool: PersistedTimelineItem = {
 };
 
 describe("ConversationPane", () => {
+  it("offers compact as a secondary action and reports its result", async () => {
+    const onCompact = vi.fn();
+    render(
+      <ConversationPane
+        detail={{
+          ...detail([]),
+          summary: "Earlier **decisions** and context.",
+        }}
+        run={EMPTY_RUN}
+        connection="connected"
+        loading={false}
+        onSend={vi.fn()}
+        onCompact={onCompact}
+        compactionResult={{
+          sessionId: "session_0123456789ab",
+          status: "compacted",
+          oldMessageCount: 8,
+          recentMessageCount: 2,
+          summary: "Earlier context.",
+          detail: "session summary 已更新。",
+        }}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "COMPACT" }));
+
+    expect(onCompact).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("status").textContent).toContain(
+      "8 条旧消息已写入 summary，保留 2 条活跃消息。",
+    );
+    expect(screen.getByText("OLDER MESSAGES / SUMMARY")).toBeTruthy();
+    expect(screen.getByText("decisions").tagName).toBe("STRONG");
+  });
+
   it("renders safe GFM and LaTeX for assistant content only", () => {
     render(
       <ConversationPane

@@ -34,7 +34,7 @@ def test_session_tool_catalog_exposes_planning_constraints(tmp_path) -> None:
     )
     assert "1-minute" in definitions["create_download"]["description"]
     assert "do not update this download" in definitions["create_download"]["description"]
-    assert "defaults to the workspace root" in definitions["restart_shell"]["description"]
+    assert "defaults to the workspace root" in definitions["new_shell"]["description"]
     assert "persist across calls" in definitions["run_command"]["description"]
     assert "64 KiB" in definitions["read_attachment"]["description"]
     assert (

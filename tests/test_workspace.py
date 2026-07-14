@@ -4,7 +4,7 @@ from io import BytesIO
 import pytest
 
 from claw.approval import ApprovalCoordinator
-from claw.errors import WorkspaceError
+from claw.errors import ShellError, WorkspaceError
 from claw.shell import ShellManager
 from claw.store.approvals import ApprovalStore
 from claw.store.attachments import AttachmentStore
@@ -65,8 +65,8 @@ def test_session_tools_require_approval_and_keep_attachment_scope(tmp_path) -> N
         BytesIO(b"secret"),
     )
     registry = SessionToolProvider(attachments, downloads, shells).for_session(first)
-    assert registry.get("restart_shell") is not None
-    assert registry.get("new_shell") is None
+    assert registry.get("new_shell") is not None
+    assert registry.get("restart_shell") is None
 
     denied = run(
         registry,
@@ -101,32 +101,34 @@ def test_session_tools_require_approval_and_keep_attachment_scope(tmp_path) -> N
     assert record.blob_path.read_text() == "hello"
 
 
-def test_run_command_starts_shell_keeps_state_and_recovers_after_escape(tmp_path) -> None:
+def test_new_shell_keeps_state_and_run_command_requires_explicit_restart(tmp_path) -> None:
     async def scenario():
         project = tmp_path / "project"
         child = project / "child"
         child.mkdir(parents=True)
         workspace = Workspace.from_path(project)
         manager = ShellManager(timeout_seconds=2)
+        with pytest.raises(ShellError, match="new_shell"):
+            await manager.run_command("session", workspace, "pwd")
+        started = await manager.new_shell("session", workspace, project.resolve())
         first = await manager.run_command("session", workspace, "export CLAW_TEST=kept; cd child")
         second = await manager.run_command("session", workspace, 'printf "%s" "$CLAW_TEST"')
-        restarted = await manager.restart_shell("session", workspace, child.resolve())
+        restarted = await manager.new_shell("session", workspace, child.resolve())
         escaped = await manager.run_command("session", workspace, "cd ../..")
-        recovered = await manager.run_command("session", workspace, "pwd")
+        with pytest.raises(ShellError, match="new_shell"):
+            await manager.run_command("session", workspace, "pwd")
         await manager.close_all()
-        return first, second, restarted, escaped, recovered, str(project.resolve())
+        return started, first, second, restarted, escaped
 
-    first, second, restarted, escaped, recovered, project_root = asyncio.run(scenario())
+    started, first, second, restarted, escaped = asyncio.run(scenario())
+    assert started["tool"] == "new_shell"
     assert first["success"] is True and first["cwd"].endswith("/child")
-    assert first["shellStarted"] is True
+    assert first["shellStarted"] is False
     assert second["stdout"] == "kept"
     assert second["shellStarted"] is False
-    assert restarted["tool"] == "restart_shell"
+    assert restarted["tool"] == "new_shell"
     assert restarted["cwd"].endswith("/child")
     assert escaped["success"] is False and "离开 workspace" in escaped["error"]
-    assert recovered["success"] is True
-    assert recovered["shellStarted"] is True
-    assert recovered["cwd"] == project_root
 
 
 def test_approval_coordinator_persists_and_wakes_waiter(tmp_path) -> None:

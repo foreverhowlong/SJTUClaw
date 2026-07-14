@@ -1,5 +1,6 @@
 import type {
   AttachmentMetadata,
+  CompactionResponse,
   CreateScheduledTaskInput,
   MemoryRecord,
   ScheduledTask,
@@ -44,6 +45,12 @@ export function renameSession(
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
+  });
+}
+
+export function compactSession(sessionId: string): Promise<CompactionResponse> {
+  return request<CompactionResponse>(`/api/sessions/${sessionId}/compact`, {
+    method: "POST",
   });
 }
 

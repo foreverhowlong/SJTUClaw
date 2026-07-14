@@ -16,6 +16,7 @@ class RuntimePaths:
     tasks_dir: Path
     approvals_dir: Path
     downloads_dir: Path
+    executions_dir: Path
     logs_dir: Path
     skills_dir: Path | None = None
     system_prompt_file: Path | None = None
@@ -32,6 +33,7 @@ class RuntimePaths:
             tasks_dir=home / "data" / "tasks",
             approvals_dir=home / "data" / "approvals",
             downloads_dir=home / "data" / "downloads",
+            executions_dir=home / "data" / "executions",
             logs_dir=home / "logs",
             skills_dir=home / "skills",
             system_prompt_file=_optional_path("CLAW_SYSTEM_PROMPT"),

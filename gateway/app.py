@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import logging
 import os
+from dataclasses import asdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
-from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -24,27 +22,24 @@ from claw.errors import (
     DownloadError,
     MemoryError,
     SessionError,
+    SessionConflictError,
     SkillError,
     TaskConflictError,
     TaskError,
     TaskNotFoundError,
 )
-from claw.events import AgentEvent
-from claw.presentation.timeline import build_conversation_timeline, tool_activity
 from claw.runtime import ClawRuntime, build_runtime, serve_runtime
-from claw.session import Session
-from claw.skills import SkillRequest
-from claw.store.sessions import SessionSummary
-from gateway.realtime import GatewayConnection, GatewayConnectionHub
+from claw.session_coordination import SessionCoordinator
+from claw.session_lifecycle import SessionLifecycleService
+from gateway.realtime import GatewayConnectionHub
+from gateway.chat import router as chat_router
+from gateway.session_views import session_detail, session_summary
 from gateway.task_routes import router as task_router
 from gateway.approval_routes import router as approval_router
 from gateway.download_routes import router as download_router
 from gateway.memory_routes import router as memory_router
 from gateway.workspace_routes import router as workspace_router
 from gateway.skill_routes import router as skill_router
-
-
-logger = logging.getLogger(__name__)
 
 
 class CreateSessionRequest(BaseModel):
@@ -66,7 +61,19 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         if not hasattr(app.state, "runtime"):
             app.state.runtime = build_runtime()
-        app.state.session_locks = {}
+        active_runtime = app.state.runtime
+        if not hasattr(active_runtime, "session_coordinator"):
+            active_runtime.session_coordinator = SessionCoordinator(
+                active_runtime.session_store.root
+            )
+        if not hasattr(active_runtime, "session_lifecycle"):
+            active_runtime.session_lifecycle = SessionLifecycleService(
+                active_runtime.session_store,
+                active_runtime.session_coordinator,
+                scheduler=getattr(active_runtime, "scheduler", None),
+                approvals=getattr(active_runtime, "approval_store", None),
+                shells=getattr(active_runtime, "shell_manager", None),
+            )
         app.state.connection_hub = GatewayConnectionHub()
         unsubscribe = app.state.runtime.scheduler.subscribe_session_updates(
             lambda session_id: _broadcast_session_updated(app, session_id)
@@ -98,6 +105,10 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
         message = str(exc)
         status = 404 if "不存在" in message or "无效的 sessionId" in message else 400
         return _error_response(status, "session_error", message)
+
+    @app.exception_handler(SessionConflictError)
+    async def handle_session_conflict(_request: Request, exc: SessionConflictError):
+        return _error_response(409, "session_conflict", str(exc))
 
     @app.exception_handler(AttachmentError)
     async def handle_attachment_error(_request: Request, exc: AttachmentError):
@@ -147,7 +158,7 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
     @app.get("/api/sessions")
     async def list_sessions(request: Request) -> dict[str, list[dict[str, Any]]]:
         items = _runtime(request).session_store.list()
-        return {"sessions": [_session_summary(item) for item in items]}
+        return {"sessions": [session_summary(item) for item in items]}
 
     @app.post("/api/sessions", status_code=201)
     async def create_session(
@@ -155,12 +166,12 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
         request: Request,
     ) -> dict[str, Any]:
         session = _runtime(request).session_store.create(payload.title)
-        return _session_detail(session)
+        return session_detail(session)
 
     @app.get("/api/sessions/{session_id}")
     async def get_session(session_id: str, request: Request) -> dict[str, Any]:
         session = _runtime(request).session_store.load(session_id)
-        return _session_detail(session)
+        return session_detail(session)
 
     @app.patch("/api/sessions/{session_id}")
     async def rename_session(
@@ -168,16 +179,43 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
         payload: RenameSessionRequest,
         request: Request,
     ) -> dict[str, Any]:
-        async with _session_lock(request.app, session_id):
+        async with _runtime(request).session_coordinator.mutation(session_id):
             session = _runtime(request).session_store.rename(session_id, payload.title)
-        return _session_detail(session)
+        return session_detail(session)
+
+    @app.post("/api/sessions/{session_id}/compact")
+    async def compact_session(session_id: str, request: Request) -> dict[str, Any]:
+        runtime = _runtime(request)
+        result = await runtime.agent.compact_session(session_id, force=True)
+        session = runtime.session_store.load(session_id)
+        await _broadcast_session_updated(
+            request.app,
+            session_id,
+            reason="compaction",
+        )
+        result_payload = asdict(result)
+        return {
+            "result": {
+                "sessionId": result_payload["session_id"],
+                "status": result_payload["status"],
+                "oldMessageCount": result_payload["old_message_count"],
+                "recentMessageCount": result_payload["recent_message_count"],
+                "summary": result_payload["summary"],
+                "detail": result_payload["detail"],
+            },
+            "session": session_detail(session),
+        }
 
     @app.delete("/api/sessions/{session_id}", status_code=204)
-    async def delete_session(session_id: str, request: Request) -> Response:
-        async with _session_lock(request.app, session_id):
-            if hasattr(_runtime(request), "shell_manager"):
-                await _runtime(request).shell_manager.close(session_id)
-            _runtime(request).session_store.delete(session_id)
+    async def delete_session(
+        session_id: str,
+        request: Request,
+        cascade: bool = Query(default=False),
+    ) -> Response:
+        await _runtime(request).session_lifecycle.delete(
+            session_id,
+            cascade=cascade,
+        )
         return Response(status_code=204)
 
     @app.get("/api/sessions/{session_id}/attachments")
@@ -194,88 +232,17 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
         request: Request,
         file: UploadFile = File(...),
     ) -> dict[str, object]:
-        record = await asyncio.to_thread(
-            _runtime(request).attachment_store.save,
-            session_id,
-            file.filename or "",
-            file.content_type,
-            file.file,
-        )
+        async with _runtime(request).session_coordinator.mutation(session_id):
+            record = await asyncio.to_thread(
+                _runtime(request).attachment_store.save,
+                session_id,
+                file.filename or "",
+                file.content_type,
+                file.file,
+            )
         return record.to_dict()
 
-    @app.websocket("/ws/chat")
-    async def chat(websocket: WebSocket) -> None:
-        connection = await _connection_hub(websocket.app).connect(websocket)
-        try:
-            while True:
-                try:
-                    raw = await websocket.receive_text()
-                except WebSocketDisconnect:
-                    return
-
-                request_id = f"request_{uuid4().hex[:12]}"
-                try:
-                    value = json.loads(raw)
-                    request_id, session_id, message, skill_name = _parse_turn_request(
-                        value,
-                        request_id,
-                    )
-                    active_runtime: ClawRuntime = websocket.app.state.runtime
-                    created = session_id is None
-                    if created:
-                        session = active_runtime.session_store.create()
-                        session_id = session.session_id
-                    else:
-                        session = active_runtime.session_store.load(session_id)
-
-                    await connection.send_json(
-                        {
-                            "type": "session_resolved",
-                            "requestId": request_id,
-                            "created": created,
-                            "session": _session_detail(session),
-                        }
-                    )
-                    live_tools: dict[str, tuple[str, str]] = {}
-                    turn_events = (
-                        active_runtime.agent.run_turn(session_id, message)
-                        if skill_name is None
-                        else active_runtime.agent.run_turn(
-                            session_id,
-                            message,
-                            skill_request=SkillRequest.explicit(skill_name),
-                        )
-                    )
-                    async for event in turn_events:
-                        await connection.send_json(
-                            {
-                                "type": "agent_event",
-                                "requestId": request_id,
-                                "event": _web_event(event, live_tools),
-                            }
-                        )
-                except WebSocketDisconnect:
-                    return
-                except (ClawError, ValueError, TypeError, json.JSONDecodeError) as exc:
-                    await _send_gateway_error(
-                        connection,
-                        request_id,
-                        "invalid_request",
-                        str(exc),
-                    )
-                except Exception:
-                    logger.exception(
-                        "gateway websocket request failed: %s", request_id
-                    )
-                    await _send_gateway_error(
-                        connection,
-                        request_id,
-                        "gateway_error",
-                        "Gateway 处理请求时发生内部错误。",
-                    )
-        finally:
-            _connection_hub(websocket.app).disconnect(connection)
-
+    app.include_router(chat_router)
     app.include_router(task_router)
     app.include_router(memory_router)
     app.include_router(workspace_router)
@@ -294,148 +261,21 @@ def _runtime(request: Request) -> ClawRuntime:
     return request.app.state.runtime
 
 
-def _session_lock(app: Any, session_id: str) -> asyncio.Lock:
-    locks: dict[str, asyncio.Lock] = app.state.session_locks
-    return locks.setdefault(session_id, asyncio.Lock())
-
-
-def _session_summary(item: SessionSummary) -> dict[str, Any]:
-    return {
-        "sessionId": item.session_id,
-        "title": item.title,
-        "messageCount": item.message_count,
-        "createdAt": item.created_at.isoformat(),
-        "updatedAt": item.updated_at.isoformat(),
-    }
-
-
-def _session_detail(session: Session) -> dict[str, Any]:
-    return {
-        "sessionId": session.session_id,
-        "title": session.title,
-        "messageCount": session.message_count,
-        "createdAt": session.created_at.isoformat(),
-        "updatedAt": session.updated_at.isoformat(),
-        "revision": session.revision,
-        "summary": session.summary,
-        "workspace": session.workspace,
-        "messages": session.messages,
-        "timeline": build_conversation_timeline(session.messages),
-    }
-
-
-def _web_event(
-    event: AgentEvent,
-    live_tools: dict[str, tuple[str, str]],
-) -> dict[str, Any]:
-    """Attach shared presentation data while retaining the runtime event contract."""
-    rendered = event.to_dict()
-    payload = dict(rendered["payload"])
-    rendered["payload"] = payload
-    if event.type == "tool_call":
-        call_id = str(payload["callId"])
-        name = str(payload["name"])
-        arguments = str(payload["arguments"])
-        live_tools[call_id] = (name, arguments)
-        payload["timelineItem"] = tool_activity(call_id, name, arguments)
-    elif event.type == "tool_result":
-        call_id = str(payload["callId"])
-        name, arguments = live_tools.get(
-            call_id,
-            (str(payload["name"]), "{}"),
-        )
-        payload["timelineItem"] = tool_activity(
-            call_id,
-            name,
-            arguments,
-            status="succeeded" if payload["ok"] else "failed",
-            result=payload.get("result"),
-            error=str(payload.get("error", "")),
-        )
-    elif event.type in {"approval_required", "approval_resolved"}:
-        call_id = str(payload["callId"])
-        name, arguments = live_tools.get(
-            call_id,
-            (str(payload["name"]), "{}"),
-        )
-        if event.type == "approval_required":
-            status = "awaiting_approval"
-            error = ""
-        else:
-            status = "running" if payload["approved"] else "failed"
-            error = "" if payload["approved"] else str(payload["reason"])
-        item = tool_activity(
-            call_id,
-            name,
-            arguments,
-            status=status,
-            error=error,
-        )
-        if event.type == "approval_required":
-            item["approval"] = {
-                "approvalId": payload.get("approvalId"),
-                "arguments": payload.get("arguments", {}),
-                "workspace": payload.get("workspace"),
-            }
-        payload["timelineItem"] = item
-    return rendered
-
-
-def _parse_turn_request(
-    value: Any,
-    fallback_request_id: str,
-) -> tuple[str, str | None, str, str | None]:
-    if not isinstance(value, dict) or value.get("type") != "run_turn":
-        raise ValueError("WebSocket 消息 type 必须是 run_turn。")
-    request_id = value.get("requestId", fallback_request_id)
-    if not isinstance(request_id, str) or not request_id.strip():
-        raise ValueError("requestId 必须是非空字符串。")
-    session_id = value.get("sessionId")
-    if session_id is not None and (
-        not isinstance(session_id, str) or not session_id.strip()
-    ):
-        raise ValueError("sessionId 必须是非空字符串或 null。")
-    message = value.get("message")
-    if not isinstance(message, str) or not message.strip():
-        raise ValueError("message 必须是非空字符串。")
-    skill_name = value.get("skillName")
-    if skill_name is not None and (
-        not isinstance(skill_name, str) or not skill_name.strip()
-    ):
-        raise ValueError("skillName 必须是非空字符串或 null。")
-    return (
-        request_id.strip(),
-        session_id,
-        message.strip(),
-        skill_name.strip() if isinstance(skill_name, str) else None,
-    )
-
-
-async def _send_gateway_error(
-    connection: GatewayConnection,
-    request_id: str,
-    code: str,
-    message: str,
-) -> None:
-    await connection.send_json(
-        {
-            "type": "gateway_error",
-            "requestId": request_id,
-            "error": {"code": code, "message": message},
-        }
-    )
-
-
 def _connection_hub(app: Any) -> GatewayConnectionHub:
     return app.state.connection_hub
 
 
-async def _broadcast_session_updated(app: Any, session_id: str) -> None:
+async def _broadcast_session_updated(
+    app: Any,
+    session_id: str,
+    *,
+    reason: str = "scheduled_task",
+) -> None:
     await _connection_hub(app).broadcast(
         {
             "type": "session_updated",
             "sessionId": session_id,
-            "reason": "scheduled_task",
+            "reason": reason,
         }
     )
 

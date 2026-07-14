@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
+  compactSession,
   createSession,
   deleteSession as deleteSessionRequest,
   getSession,
@@ -19,6 +20,7 @@ import { SessionRail } from "./components/SessionRail";
 import { applyAgentEvent, EMPTY_RUN, settleRun, startRun } from "./state";
 import type {
   AttachmentMetadata,
+  CompactionResult,
   GatewayMessage,
   SessionDetail,
   SessionRunState,
@@ -45,6 +47,12 @@ export default function App() {
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [skillUsages, setSkillUsages] = useState<Record<string, SkillUsage[]>>({});
   const [selectedSkillName, setSelectedSkillName] = useState<string | null>(null);
+  const [compactingSessionIds, setCompactingSessionIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [compactionResults, setCompactionResults] = useState<
+    Record<string, CompactionResult>
+  >({});
   const reportTaskError = useCallback((message: string) => setError(message), []);
   const scheduled = useScheduledTasks(reportTaskError);
   const memory = useMemories(reportTaskError);
@@ -209,6 +217,7 @@ export default function App() {
         setDetails((previous) => omitKey(previous, sessionId));
         setAttachments((previous) => omitKey(previous, sessionId));
         setRuns((previous) => omitKey(previous, sessionId));
+        setCompactionResults((previous) => omitKey(previous, sessionId));
         const remaining = await refreshSessions();
         if (activeSessionId !== sessionId) return;
 
@@ -239,6 +248,7 @@ export default function App() {
       if (!activeSessionId) return;
       const requestId = `request_${crypto.randomUUID().replaceAll("-", "")}`;
       setError(null);
+      setCompactionResults((previous) => omitKey(previous, activeSessionId));
       setRuns((previous) => ({
         ...previous,
         [activeSessionId]: startRun(
@@ -278,6 +288,38 @@ export default function App() {
     [activeSessionId],
   );
 
+  const handleCompact = useCallback(async () => {
+    if (!activeSessionId || runs[activeSessionId]?.running) return;
+    const sessionId = activeSessionId;
+    setError(null);
+    setCompactionResults((previous) => omitKey(previous, sessionId));
+    setCompactingSessionIds((previous) => addSetValue(previous, sessionId));
+    try {
+      const response = await compactSession(sessionId);
+      setDetails((previous) => ({
+        ...previous,
+        [sessionId]: response.session,
+      }));
+      setCompactionResults((previous) => ({
+        ...previous,
+        [sessionId]: response.result,
+      }));
+      await refreshSessions();
+      if (
+        response.result.status === "failed" ||
+        response.result.status === "unavailable"
+      ) {
+        setError(response.result.detail);
+      }
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setCompactingSessionIds((previous) =>
+        removeSetValue(previous, sessionId),
+      );
+    }
+  }, [activeSessionId, refreshSessions, runs]);
+
   const handleResolveApproval = useCallback(async (approvalId: string, approved: boolean, reason: string) => {
     try {
       await resolveApproval(approvalId, approved, reason);
@@ -309,13 +351,14 @@ export default function App() {
     [connection],
   );
   const runningSessionIds = useMemo(
-    () =>
-      new Set(
-        Object.entries(runs)
-          .filter(([, run]) => run.running)
-          .map(([sessionId]) => sessionId),
-      ),
-    [runs],
+    () => {
+      const active = new Set(compactingSessionIds);
+      for (const [sessionId, run] of Object.entries(runs)) {
+        if (run.running) active.add(sessionId);
+      }
+      return active;
+    },
+    [compactingSessionIds, runs],
   );
 
   return (
@@ -385,6 +428,15 @@ export default function App() {
             connection={connection}
             loading={loading}
             onSend={handleSend}
+            onCompact={() => void handleCompact()}
+            compacting={
+              activeSessionId
+                ? compactingSessionIds.has(activeSessionId)
+                : false
+            }
+            compactionResult={
+              activeSessionId ? compactionResults[activeSessionId] : undefined
+            }
             onResolveApproval={handleResolveApproval}
             selectedSkillName={selectedSkillName}
             onClearSkill={() => setSelectedSkillName(null)}
@@ -436,5 +488,17 @@ function errorMessage(reason: unknown): string {
 function omitKey<T>(source: Record<string, T>, key: string): Record<string, T> {
   const next = { ...source };
   delete next[key];
+  return next;
+}
+
+function addSetValue<T>(source: Set<T>, value: T): Set<T> {
+  const next = new Set(source);
+  next.add(value);
+  return next;
+}
+
+function removeSetValue<T>(source: Set<T>, value: T): Set<T> {
+  const next = new Set(source);
+  next.delete(value);
   return next;
 }

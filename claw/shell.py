@@ -30,7 +30,7 @@ class ShellManager:
         self.timeout_seconds = timeout_seconds
         self._shells: dict[str, ManagedShell] = {}
 
-    async def restart_shell(
+    async def new_shell(
         self,
         session_id: str,
         workspace: Workspace,
@@ -40,16 +40,16 @@ class ShellManager:
         await self._start_shell(session_id, workspace, cwd)
         return {
             "success": True,
-            "tool": "restart_shell",
+            "tool": "new_shell",
             "cwd": str(cwd),
             "message": "shell restarted",
         }
 
-    async def ensure_shell(
+    async def get_shell(
         self,
         session_id: str,
         workspace: Workspace,
-    ) -> tuple[ManagedShell, bool]:
+    ) -> ManagedShell:
         shell = self._shells.get(session_id)
         if shell is not None and shell.process.returncode is not None:
             self._shells.pop(session_id, None)
@@ -61,13 +61,10 @@ class ShellManager:
             await self.close(session_id)
             shell = None
         if shell is None:
-            shell = await self._start_shell(
-                session_id,
-                workspace,
-                workspace.root,
+            raise ShellError(
+                "当前 session 尚未启动 shell，请先调用 new_shell。"
             )
-            return shell, True
-        return shell, False
+        return shell
 
     async def _start_shell(
         self,
@@ -96,7 +93,7 @@ class ShellManager:
         workspace: Workspace,
         command: str,
     ) -> dict[str, object]:
-        shell, shell_started = await self.ensure_shell(session_id, workspace)
+        shell = await self.get_shell(session_id, workspace)
 
         async with shell.lock:
             marker = f"__CLAW_{uuid4().hex}__"
@@ -134,7 +131,7 @@ class ShellManager:
                     "stderr": "",
                     "timedOut": True,
                     "truncated": False,
-                    "shellStarted": shell_started,
+                    "shellStarted": False,
                     "error": "命令执行超时，shell 已终止。",
                 }
             except (EOFError, UnicodeError, ValueError) as exc:
@@ -157,7 +154,7 @@ class ShellManager:
                 "stderr": stderr,
                 "timedOut": False,
                 "truncated": truncated,
-                "shellStarted": shell_started,
+                "shellStarted": False,
                 "error": (
                     "shell 离开 workspace，已终止。"
                     if escaped

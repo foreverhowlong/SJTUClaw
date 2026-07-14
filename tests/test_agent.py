@@ -15,7 +15,10 @@ from claw.store.attachments import AttachmentStore
 from claw.store.approvals import ApprovalStore
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
+from claw.store.tool_executions import ToolExecutionStore
+from claw.tool_execution import ToolExecutionCoordinator
 from claw.tools import ToolCall, ToolDefinition, ToolRegistry
+from claw.turn_limits import TurnLimits
 
 
 STABLE_CONTEXT = "[System Prompt]\nsystem instruction\n\n[Soul]\nstable style"
@@ -187,6 +190,87 @@ def test_agent_executes_tool_and_persists_complete_protocol_turn(tmp_path) -> No
         "assistant",
     ]
     assert persisted[-1]["content"] == "Based on real observation."
+
+
+def test_turn_budget_forces_one_tool_free_final_round(tmp_path) -> None:
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            "echo",
+            "Echo text.",
+            {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            lambda args: args["text"],
+        )
+    )
+    first = ToolCall("call_budget_1", "echo", '{"text":"one"}')
+    llm = FakeLLM([calls(first), final("Stopped safely.")])
+    store = SessionStore(tmp_path / "sessions")
+    session_id = store.create().session_id
+    agent = AgentService(
+        llm,
+        store,
+        ContextBuilder("system", "soul"),
+        MemoryStore(tmp_path / "memory"),
+        tool_registry=registry,
+        turn_limits=TurnLimits(max_llm_rounds=1, max_total_tool_calls=2),
+    )
+
+    events = asyncio.run(collect(agent, session_id, "keep using tools"))
+
+    assert [event.type for event in events].count("warning") == 1
+    assert next(event for event in events if event.type == "warning").payload[
+        "code"
+    ] == "turn_budget_exhausted"
+    assert llm.calls[0][1]
+    assert llm.calls[1][1] == []
+    assert store.load(session_id).messages[-1] == {
+        "role": "assistant",
+        "content": "Stopped safely.",
+    }
+
+
+def test_turn_context_freezes_memory_across_tool_iterations(tmp_path) -> None:
+    memories = MemoryStore(tmp_path / "memory")
+    memories.add("visible at turn start")
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            "echo",
+            "Echo text.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda _args: "ok",
+        )
+    )
+
+    class MutatingLLM(FakeLLM):
+        async def stream_chat(self, messages, tools=()):
+            if not self.calls:
+                memories.add("must wait until next turn")
+            async for event in super().stream_chat(messages, tools):
+                yield event
+
+    llm = MutatingLLM(
+        [calls(ToolCall("call_freeze", "echo", "{}")), final("done")]
+    )
+    store = SessionStore(tmp_path / "sessions")
+    session_id = store.create().session_id
+    agent = AgentService(
+        llm,
+        store,
+        ContextBuilder("system", "soul"),
+        memories,
+        tool_registry=registry,
+    )
+
+    asyncio.run(collect(agent, session_id, "inspect"))
+
+    assert "visible at turn start" in llm.calls[1][0][0]["content"]
+    assert "must wait until next turn" not in llm.calls[1][0][0]["content"]
 
 
 def test_agent_reads_attachment_through_session_scoped_tool(tmp_path) -> None:
@@ -561,9 +645,16 @@ def test_real_approval_coordinator_suspends_then_executes(tmp_path) -> None:
         )
     )
     sessions = SessionStore(tmp_path / "sessions")
+    approval_store = ApprovalStore(tmp_path / "approvals")
     coordinator = ApprovalCoordinator(
-        ApprovalStore(tmp_path / "approvals"),
+        approval_store,
         timeout_seconds=1,
+    )
+    execution_store = ToolExecutionStore(tmp_path / "executions")
+    execution_coordinator = ToolExecutionCoordinator(
+        execution_store,
+        approval_store,
+        sessions=sessions,
     )
     session = sessions.create()
     agent = AgentService(
@@ -573,6 +664,7 @@ def test_real_approval_coordinator_suspends_then_executes(tmp_path) -> None:
         MemoryStore(tmp_path / "memory"),
         tool_registry=registry,
         approval_policy=coordinator,
+        tool_execution_coordinator=execution_coordinator,
     )
 
     async def scenario():
@@ -592,6 +684,8 @@ def test_real_approval_coordinator_suspends_then_executes(tmp_path) -> None:
     )
     assert executed == ["done"]
     assert coordinator.store.get(approval_id).status == "succeeded"
+    execution = execution_store.list()[0]
+    assert execution.status == "succeeded" and execution.session_recorded
     assert sessions.load(session.session_id).messages[2]["name"] == "advanced"
 
 

@@ -167,12 +167,34 @@ class ApprovalStore:
             return updated
 
     def recover_interrupted(self) -> None:
+        for status in ("pending", "approved"):
+            for record in self.list(status=status):
+                self._expire(
+                    record.approval_id,
+                    reason="runtime restarted before the approval flow completed",
+                )
         for record in self.list(status="executing"):
             self.mark_execution(
                 record.approval_id,
                 "interrupted",
                 reason="runtime restarted while tool execution was in progress",
             )
+
+    def _expire(self, approval_id: str, *, reason: str) -> ApprovalRequest:
+        with self._lock():
+            current = self.get(approval_id)
+            if current.status not in {"pending", "approved"}:
+                raise ApprovalError(
+                    f"Approval {approval_id} 不能从 {current.status} 进入 expired。"
+                )
+            updated = replace(
+                current,
+                status="expired",
+                reason=reason,
+                updated_at=datetime.now(timezone.utc),
+            )
+            self._write(updated)
+            return updated
 
     def _path(self, approval_id: str) -> Path:
         if not approval_id.startswith("approval_") or any(

@@ -56,11 +56,12 @@ class CreateTaskRequest(BaseModel):
 @router.post("", status_code=201)
 async def create_task(payload: CreateTaskRequest, request: Request) -> dict[str, object]:
     runtime = _runtime(request)
-    task = runtime.scheduler.create_task(
-        payload.session_id,
-        payload.content,
-        payload.domain_schedule(),
-    )
+    async with runtime.session_coordinator.mutation(payload.session_id):
+        task = runtime.scheduler.create_task(
+            payload.session_id,
+            payload.content,
+            payload.domain_schedule(),
+        )
     return task.to_dict()
 
 

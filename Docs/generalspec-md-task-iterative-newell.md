@@ -1,5 +1,8 @@
 # SJTUClaw 整体架构与模块设计
 
+> 本文是分步实施路线图，其中目录树保留了早期规划名称。当前已实现模块、
+> API 与故障语义以仓库根目录 `README.md` 和源码为准。
+
 ## Context
 
 课程项目 SJTUClaw:一个最小 agent runtime,需覆盖 [generalSpec.MD](generalSpec.MD) 的全部 11 项要求(LLM 调用、CLI 多轮对话、多 session、上下文管理、压缩、tool call、Gateway+图形化入口、定时任务、workspace+approval、skill system、统一 runtime),并加入两个前沿记忆点:**Agent 思考过程实时可视化** 与 **自省式长期记忆 (auto-memory)**。

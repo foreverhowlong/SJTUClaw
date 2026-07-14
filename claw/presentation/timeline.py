@@ -43,6 +43,7 @@ _TOOL_ACTIONS = {
     "overwrite_file": "覆盖文件",
     "edit_file": "编辑文件",
     "copy_attachment_to_workspace": "拷贝附件",
+    "new_shell": "启动 Shell",
     "restart_shell": "重启 Shell",
     "run_command": "运行命令",
     "create_download": "准备下载",
@@ -57,6 +58,7 @@ _TARGET_ARGUMENTS = {
     "overwrite_file": "path",
     "edit_file": "path",
     "copy_attachment_to_workspace": "path",
+    "new_shell": "cwd",
     "restart_shell": "cwd",
     "run_command": "command",
     "create_download": "path",
@@ -214,7 +216,7 @@ def _result_detail(name: str, result: Any) -> str:
     if name in {"create_file", "overwrite_file", "edit_file", "copy_attachment_to_workspace"} and isinstance(result, dict):
         message = result.get("message")
         return message if isinstance(message, str) else ""
-    if name == "restart_shell" and isinstance(result, dict):
+    if name in {"new_shell", "restart_shell"} and isinstance(result, dict):
         cwd = result.get("cwd")
         return str(cwd) if cwd else ""
     if name == "run_command" and isinstance(result, dict):

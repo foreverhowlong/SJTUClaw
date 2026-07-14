@@ -28,9 +28,10 @@ async def set_workspace(
     request: Request,
 ) -> dict[str, object]:
     service = request.app.state.runtime.workspace_service
-    session = (
-        service.set(session_id, payload.path)
-        if payload.path is not None
-        else service.clear(session_id)
-    )
+    async with request.app.state.runtime.session_coordinator.mutation(session_id):
+        session = (
+            service.set(session_id, payload.path)
+            if payload.path is not None
+            else service.clear(session_id)
+        )
     return {"sessionId": session_id, "workspace": session.workspace}

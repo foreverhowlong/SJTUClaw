@@ -141,13 +141,21 @@ class ApprovalCoordinator:
     def record_execution_result(self, approval_id: str, result: ToolResult) -> None:
         self.store.mark_execution(
             approval_id,
-            "succeeded" if result.ok else "failed",
+            "interrupted" if result.uncertain else (
+                "succeeded" if result.ok else "failed"
+            ),
             result={
                 "ok": result.ok,
                 "tool": result.name,
                 "value": result.value,
                 "error": result.error,
+                "uncertain": result.uncertain,
             },
+            reason=(
+                "工具超时后仍可能产生副作用，执行结果不确定。"
+                if result.uncertain
+                else ""
+            ),
         )
 
 

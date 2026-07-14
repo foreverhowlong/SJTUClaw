@@ -15,6 +15,8 @@ from claw.llm import LLMClient
 from claw.logging_config import configure_logging
 from claw.paths import RuntimePaths
 from claw.scheduler import Scheduler
+from claw.session_coordination import SessionCoordinator
+from claw.session_lifecycle import SessionLifecycleService
 from claw.shell import ShellManager
 from claw.skills import SkillRegistry
 from claw.store.approvals import ApprovalStore
@@ -23,6 +25,8 @@ from claw.store.memory import MemoryStore
 from claw.store.downloads import DownloadStore
 from claw.store.sessions import SessionStore
 from claw.store.tasks import TaskStore
+from claw.store.tool_executions import ToolExecutionStore
+from claw.tool_execution import ToolExecutionCoordinator
 from claw.tools.factory import SessionToolProvider
 from claw.workspace import WorkspaceService
 
@@ -40,6 +44,10 @@ class ClawRuntime:
     workspace_service: WorkspaceService
     shell_manager: ShellManager
     skill_registry: SkillRegistry
+    session_coordinator: SessionCoordinator
+    session_lifecycle: SessionLifecycleService
+    execution_store: ToolExecutionStore
+    tool_execution_coordinator: ToolExecutionCoordinator
     agent: AgentService
     scheduler: Scheduler
 
@@ -50,11 +58,19 @@ def build_runtime(paths: RuntimePaths | None = None) -> ClawRuntime:
     configure_logging(resolved_paths.logs_dir)
     config = load_llm_config(resolved_paths.env_file)
     session_store = SessionStore(resolved_paths.sessions_dir)
+    session_coordinator = SessionCoordinator(resolved_paths.sessions_dir)
     memory_store = MemoryStore(resolved_paths.memory_dir)
     attachment_store = AttachmentStore(session_store)
     task_store = TaskStore(resolved_paths.tasks_dir)
     approval_store = ApprovalStore(resolved_paths.approvals_dir)
     approval_coordinator = ApprovalCoordinator(approval_store)
+    execution_store = ToolExecutionStore(resolved_paths.executions_dir)
+    tool_execution_coordinator = ToolExecutionCoordinator(
+        execution_store,
+        approval_store,
+        attachment_store,
+        session_store,
+    )
     download_store = DownloadStore(resolved_paths.downloads_dir)
     workspace_service = WorkspaceService(session_store)
     shell_manager = ShellManager(timeout_seconds=25)
@@ -79,8 +95,17 @@ def build_runtime(paths: RuntimePaths | None = None) -> ClawRuntime:
         attachment_store=attachment_store,
         tool_provider=tool_provider,
         skill_registry=skill_registry,
+        session_coordinator=session_coordinator,
+        tool_execution_coordinator=tool_execution_coordinator,
     )
     scheduler = Scheduler(task_store, session_store, agent)
+    session_lifecycle = SessionLifecycleService(
+        session_store,
+        session_coordinator,
+        scheduler=scheduler,
+        approvals=approval_store,
+        shells=shell_manager,
+    )
     return ClawRuntime(
         paths=resolved_paths,
         session_store=session_store,
@@ -93,6 +118,10 @@ def build_runtime(paths: RuntimePaths | None = None) -> ClawRuntime:
         workspace_service=workspace_service,
         shell_manager=shell_manager,
         skill_registry=skill_registry,
+        session_coordinator=session_coordinator,
+        session_lifecycle=session_lifecycle,
+        execution_store=execution_store,
+        tool_execution_coordinator=tool_execution_coordinator,
         agent=agent,
         scheduler=scheduler,
     )
@@ -101,6 +130,8 @@ def build_runtime(paths: RuntimePaths | None = None) -> ClawRuntime:
 @asynccontextmanager
 async def serve_runtime(runtime: ClawRuntime) -> AsyncIterator[ClawRuntime]:
     """Explicitly activate long-running services for a runtime host."""
+    if hasattr(runtime, "tool_execution_coordinator"):
+        runtime.tool_execution_coordinator.recover_interrupted()
     if hasattr(runtime, "approval_store"):
         runtime.approval_store.recover_interrupted()
     if hasattr(runtime, "download_store"):

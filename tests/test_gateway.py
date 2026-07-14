@@ -8,6 +8,7 @@ import json
 from starlette.testclient import TestClient
 
 from claw.events import AgentEvent
+from claw.compaction import CompactionResult
 from claw.scheduler import Scheduler
 from claw.store.attachments import AttachmentStore
 from claw.approval import ApprovalCoordinator
@@ -25,6 +26,7 @@ class FakeAgent:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
         self.skill_requests = []
+        self.compactions: list[tuple[str, bool]] = []
 
     async def run_turn(
         self, session_id: str, user_input: str, *, source=None, skill_request=None
@@ -47,6 +49,16 @@ class FakeAgent:
         yield AgentEvent("llm_delta", session_id, {"delta": "你好"})
         yield AgentEvent("llm_message", session_id, {"content": "你好"})
         yield AgentEvent("turn_end", session_id, {"status": "completed"})
+
+    async def compact_session(self, session_id: str, *, force: bool = True):
+        self.compactions.append((session_id, force))
+        return CompactionResult(
+            session_id=session_id,
+            status="skipped",
+            old_message_count=0,
+            recent_message_count=0,
+            detail="没有足够的完整旧 turns 可压缩。",
+        )
 
 
 class FakeToolAgent(FakeAgent):
@@ -221,6 +233,26 @@ def test_rest_sessions_share_the_runtime_store(tmp_path) -> None:
     assert created.json()["title"] == "Web session"
     assert detail.json()["messages"] == []
     assert detail.json()["timeline"] == []
+
+
+def test_rest_compact_reuses_agent_service_and_returns_refreshed_session(tmp_path) -> None:
+    runtime = make_runtime(tmp_path)
+    session = runtime.session_store.create("Compact me")
+
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(f"/api/sessions/{session.session_id}/compact")
+
+    assert response.status_code == 200
+    assert runtime.agent.compactions == [(session.session_id, True)]
+    assert response.json()["result"] == {
+        "sessionId": session.session_id,
+        "status": "skipped",
+        "oldMessageCount": 0,
+        "recentMessageCount": 0,
+        "summary": "",
+        "detail": "没有足够的完整旧 turns 可压缩。",
+    }
+    assert response.json()["session"]["sessionId"] == session.session_id
 
 
 def test_rest_session_detail_projects_persisted_tool_timeline(tmp_path) -> None:
@@ -567,16 +599,16 @@ def test_workspace_approval_and_download_routes_use_runtime_services(tmp_path) -
     project.mkdir()
     output = project / "report.md"
     output.write_text("ready", encoding="utf-8")
-    approval = runtime.approval_store.create(
-        session.session_id,
-        "call_1",
-        "create_file",
-        {"path": "note.txt", "content": "hello"},
-        str(project),
-    )
     download = runtime.download_store.create(session.session_id, output)
 
     with TestClient(create_app(runtime)) as client:
+        approval = runtime.approval_store.create(
+            session.session_id,
+            "call_1",
+            "create_file",
+            {"path": "note.txt", "content": "hello"},
+            str(project),
+        )
         workspace = client.put(
             f"/api/sessions/{session.session_id}/workspace",
             json={"path": str(project)},

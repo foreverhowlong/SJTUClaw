@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
 import type {
+  CompactionResult,
   ConnectionState,
   SessionDetail,
   SessionRunState,
@@ -18,6 +19,9 @@ interface Props {
   connection: ConnectionState;
   loading: boolean;
   onSend: (content: string) => void;
+  onCompact?: () => void;
+  compacting?: boolean;
+  compactionResult?: CompactionResult;
   onResolveApproval?: (approvalId: string, approved: boolean, reason: string) => Promise<void>;
   selectedSkillName?: string | null;
   onClearSkill?: () => void;
@@ -29,6 +33,9 @@ export function ConversationPane({
   connection,
   loading,
   onSend,
+  onCompact,
+  compacting = false,
+  compactionResult,
   onResolveApproval,
   selectedSkillName,
   onClearSkill,
@@ -61,12 +68,41 @@ export function ConversationPane({
           <span className="micro-label">CONVERSATION</span>
           <h1>{detail?.title ?? "New conversation"}</h1>
         </div>
-        <span className="revision-label">
-          REV {detail?.revision ?? 0}
-        </span>
+        <div className="conversation-header-actions">
+          <button
+            className="compact-button"
+            type="button"
+            onClick={onCompact}
+            disabled={!detail || run.running || compacting}
+          >
+            {compacting ? "COMPACTING…" : "COMPACT"}
+          </button>
+          <span className="revision-label">
+            REV {detail?.revision ?? 0}
+          </span>
+        </div>
       </div>
 
       <div className="message-scroll" aria-live="polite">
+        {compactionResult && (
+          <div
+            className={`compaction-notice compaction-${compactionResult.status}`}
+            role="status"
+          >
+            <span className="micro-label">
+              COMPACTION / {compactionResult.status.toUpperCase()}
+            </span>
+            <p>{compactionMessage(compactionResult)}</p>
+          </div>
+        )}
+        {detail?.summary && (
+          <article className="session-summary-card">
+            <span className="micro-label">OLDER MESSAGES / SUMMARY</span>
+            <div className="session-summary-content">
+              <AssistantMarkdown content={detail.summary} />
+            </div>
+          </article>
+        )}
         {loading && <p className="muted-copy">正在恢复对话历史…</p>}
         {!loading && timeline.length === 0 && !run.pendingUser && (
           <div className="conversation-empty">
@@ -149,6 +185,13 @@ export function ConversationPane({
       </div>
     </section>
   );
+}
+
+function compactionMessage(result: CompactionResult): string {
+  if (result.status === "compacted") {
+    return `${result.oldMessageCount} 条旧消息已写入 summary，保留 ${result.recentMessageCount} 条活跃消息。`;
+  }
+  return result.detail;
 }
 
 function TimelineEntry({
@@ -234,28 +277,34 @@ function MessageBubble({
         {user ? (
           content
         ) : (
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[
-              [
-                rehypeKatex,
-                { throwOnError: false, trust: false, strict: false },
-              ],
-            ]}
-            skipHtml
-            components={{
-              a: ({ children, ...props }) => (
-                <a {...props} target="_blank" rel="noreferrer noopener">
-                  {children}
-                </a>
-              ),
-            }}
-          >
-            {content}
-          </ReactMarkdown>
+          <AssistantMarkdown content={content} />
         )}
         {streaming && <span className="stream-caret" aria-hidden="true" />}
       </div>
     </article>
+  );
+}
+
+function AssistantMarkdown({ content }: { content: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[
+        [
+          rehypeKatex,
+          { throwOnError: false, trust: false, strict: false },
+        ],
+      ]}
+      skipHtml
+      components={{
+        a: ({ children, ...props }) => (
+          <a {...props} target="_blank" rel="noreferrer noopener">
+            {children}
+          </a>
+        ),
+      }}
+    >
+      {content}
+    </ReactMarkdown>
   );
 }

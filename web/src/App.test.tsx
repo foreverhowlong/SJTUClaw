@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   createSession: vi.fn(),
   getSession: vi.fn(),
   deleteSession: vi.fn(),
+  compactSession: vi.fn(),
   gatewayHandler: null as
     | ((message: {
         type: "session_updated";
@@ -27,6 +28,7 @@ vi.mock("./api", () => ({
   createSession: mocks.createSession,
   getSession: mocks.getSession,
   deleteSession: mocks.deleteSession,
+  compactSession: mocks.compactSession,
   renameSession: vi.fn(),
   listAttachments: vi.fn().mockResolvedValue([]),
   uploadAttachment: vi.fn(),
@@ -79,7 +81,44 @@ function makeSession(sessionId: string, title: string): SessionDetail {
   };
 }
 
-describe("App session deletion", () => {
+describe("App session lifecycle", () => {
+  it("compacts the active session and renders the refreshed revision", async () => {
+    const user = userEvent.setup();
+    const session = makeSession("session_0123456789ab", "Long session");
+    const compacted = {
+      ...session,
+      revision: 2,
+      summary: "Earlier context.",
+    };
+    mocks.sessions = [session];
+    mocks.details = { [session.sessionId]: session };
+    mocks.listSessions.mockImplementation(async () => [...mocks.sessions]);
+    mocks.getSession.mockImplementation(
+      async (sessionId: string) => mocks.details[sessionId],
+    );
+    mocks.compactSession.mockResolvedValue({
+      result: {
+        sessionId: session.sessionId,
+        status: "compacted",
+        oldMessageCount: 6,
+        recentMessageCount: 2,
+        summary: "Earlier context.",
+        detail: "session summary 已更新。",
+      },
+      session: compacted,
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Long session" });
+    await user.click(screen.getByRole("button", { name: "COMPACT" }));
+
+    await waitFor(() => expect(screen.getByText("REV 2")).toBeTruthy());
+    expect(mocks.compactSession).toHaveBeenCalledWith(session.sessionId);
+    expect(screen.getByRole("status").textContent).toContain(
+      "6 条旧消息已写入 summary，保留 2 条活跃消息。",
+    );
+  });
+
   it("creates and selects a replacement after deleting the last session", async () => {
     const user = userEvent.setup();
     const original = makeSession("session_0123456789ab", "Only session");

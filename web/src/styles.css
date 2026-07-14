@@ -555,6 +555,35 @@ summary:focus-visible {
   color: var(--graphite);
 }
 
+.conversation-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.compact-button {
+  padding: 3px 0;
+  border: 0;
+  border-bottom: 1px solid var(--ink);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+}
+
+.compact-button:hover:not(:disabled) {
+  border-bottom-width: 2px;
+}
+
+.compact-button:disabled {
+  border-color: var(--ash);
+  color: var(--stone);
+  cursor: not-allowed;
+}
+
 .revision-label {
   color: var(--stone);
   font-size: 10px;
@@ -564,6 +593,59 @@ summary:focus-visible {
 .message-scroll {
   padding: 28px 24px;
   scroll-behavior: smooth;
+}
+
+.compaction-notice {
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--ash);
+  border-radius: var(--radius-inner);
+  background: var(--parchment);
+}
+
+.compaction-notice.compaction-compacted {
+  border-left: 4px solid var(--lime);
+}
+
+.compaction-notice p {
+  margin: 6px 0 0;
+  color: var(--graphite);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.session-summary-card {
+  margin: 0 0 28px;
+  padding: 16px 18px 18px;
+  border: 1px solid var(--ash);
+  border-left: 4px solid var(--lime);
+  border-radius: var(--radius-inner);
+  background: var(--parchment);
+}
+
+.session-summary-card > .micro-label {
+  color: var(--ink);
+}
+
+.session-summary-content {
+  max-height: 160px;
+  margin-top: 12px;
+  padding-top: 12px;
+  overflow-y: auto;
+  border-top: 1px solid var(--ash);
+  color: var(--graphite);
+  font-size: 13px;
+  line-height: 1.55;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ash) transparent;
+}
+
+.session-summary-content > :first-child {
+  margin-top: 0;
+}
+
+.session-summary-content > :last-child {
+  margin-bottom: 0;
 }
 
 .conversation-empty {

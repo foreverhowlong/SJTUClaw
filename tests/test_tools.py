@@ -200,6 +200,29 @@ def test_registry_returns_timeout_observation() -> None:
     assert result.error == "tool 执行超时（0.01 秒）。"
 
 
+def test_approved_sync_timeout_is_reported_as_uncertain() -> None:
+    registry = ToolRegistry(timeout_seconds=0.01)
+    registry.register(
+        ToolDefinition(
+            "slow_write",
+            "Slow side effect.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda _args: time.sleep(0.05),
+            safety_level="advanced",
+            requires_approval=True,
+        )
+    )
+
+    result = execute(
+        registry,
+        ToolCall("1", "slow_write", "{}"),
+        approved=True,
+    )
+
+    assert not result.ok and result.uncertain
+    assert '"uncertain": true' in result.model_content()
+
+
 def test_advanced_tools_require_approval_and_execute_after_approval() -> None:
     executed = []
     advanced = ToolDefinition(

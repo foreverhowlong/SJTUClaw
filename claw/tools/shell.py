@@ -14,14 +14,14 @@ def register_shell_tools(
     session_id: str,
     shells: ShellManager,
 ) -> None:
-    async def restart_shell(args):
+    async def new_shell(args):
         active = _require(workspace)
         cwd = active.resolve(
             args.get("cwd", "."),
             must_exist=True,
             kind="directory",
         )
-        return await shells.restart_shell(session_id, active, cwd)
+        return await shells.new_shell(session_id, active, cwd)
 
     async def run_command(args):
         active = _require(workspace)
@@ -29,11 +29,10 @@ def register_shell_tools(
 
     registry.register(
         ToolDefinition(
-            "restart_shell",
-            "Restart the session shell, discarding its current cwd and environment "
-            "state. Optional cwd must be an existing workspace directory and defaults "
-            "to the workspace root. Use only for an explicit reset or starting-"
-            "directory change.",
+            "new_shell",
+            "Start a new session shell, closing any previous shell and discarding its "
+            "cwd and environment state. Optional cwd must be an existing workspace "
+            "directory and defaults to the workspace root.",
             {
                 "type": "object",
                 "properties": {
@@ -47,7 +46,7 @@ def register_shell_tools(
                 },
                 "additionalProperties": False,
             },
-            restart_shell,
+            new_shell,
             safety_level="advanced",
             requires_approval=True,
         )
@@ -56,8 +55,8 @@ def register_shell_tools(
         ToolDefinition(
             "run_command",
             "Run one command in the persistent session shell. Shell cwd and "
-            "environment changes persist across calls. A shell is started at the "
-            "workspace root when needed. Commands have a runtime timeout; timeout "
+            "environment changes persist across calls. If no shell exists, call "
+            "new_shell first. Commands have a runtime timeout; timeout "
             "terminates the shell, and large stdout or stderr may be truncated.",
             {
                 "type": "object",

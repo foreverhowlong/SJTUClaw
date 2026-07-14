@@ -1,6 +1,6 @@
 # SJTUClaw
 
-SJTUClaw is a minimal agent runtime course project. The current implementation covers Step 8: persistent multi-session context, safe compaction, streamed OpenAI-compatible tool calling, a shared FastAPI Gateway with a React command center, persistent scheduled tasks, and session-scoped workspace tools with explicit approval for side effects.
+SJTUClaw is a minimal agent runtime course project. The current implementation covers Step 9: persistent multi-session context, safe compaction, streamed OpenAI-compatible tool calling, a shared FastAPI Gateway with a React command center, persistent scheduled tasks, session-scoped workspace tools with explicit approval for side effects, and a turn-scoped skill system.
 
 ## Setup
 
@@ -78,8 +78,12 @@ cd web && npm run dev
 
 Vite proxies `/api` and `/ws` to the local Gateway. The interface is a
 three-column agent command center: shared sessions on the left, persisted chat
-history in the middle, and session attachments or scheduled tasks on the right. Sessions can be
-renamed or deleted from the left rail. Assistant messages render safe
+history in the middle, and session attachments or scheduled tasks on the right.
+Sessions can be renamed or deleted from the left rail. The conversation header
+offers a secondary `COMPACT` action with an inline result notice. A persisted
+session summary is rendered as the first scrollable history block above the
+retained active messages, so compacted context remains available after reloads
+and session switches without pinning it over the conversation. Assistant messages render safe
 GitHub-flavored Markdown and KaTeX, while tool activities appear inline between
 working notes and final answers. Transport-only events such as turn boundaries
 and response deltas are not shown. On smaller screens the side panels become
@@ -90,7 +94,8 @@ The REST surface is intentionally small:
 - `GET /api/sessions` lists sessions created by either CLI or Web.
 - `POST /api/sessions` creates a session.
 - `PATCH /api/sessions/{sessionId}` renames a session.
-- `DELETE /api/sessions/{sessionId}` deletes a session and its attachments.
+- `POST /api/sessions/{sessionId}/compact` force-compacts complete old turns through the shared AgentService and returns the refreshed session.
+- `DELETE /api/sessions/{sessionId}` deletes an idle session and its attachments. Scheduled tasks or pending approvals require explicit `?cascade=true`; approved or executing effects always block deletion.
 - `GET /api/sessions/{sessionId}` returns persisted history.
 - `GET/POST /api/sessions/{sessionId}/attachments` lists or uploads attachments.
 - `GET/PUT /api/sessions/{sessionId}/workspace` reads or changes the session workspace.
@@ -99,6 +104,8 @@ The REST surface is intentionally small:
 - `GET/POST /api/tasks` lists or creates persistent tasks.
 - `GET /api/tasks/{taskId}` returns one task with its complete execution history.
 - `POST /api/tasks/{taskId}/cancel` cancels all future triggers without deleting history.
+- `GET /api/skills` and `GET /api/skills/{name}` expose the installed skill catalog.
+- `GET /api/sessions/{sessionId}/skill-usages` returns the session's durable skill audit trail.
 
 `/ws/chat` accepts `run_turn` frames with `requestId`, optional `sessionId`, and
 `message`. A missing session ID creates a new session; an unknown ID returns a
@@ -109,9 +116,11 @@ responses include both the provider-neutral messages and this derived timeline.
 Transport failures use `gateway_error`. One failed request does not terminate
 the connection or server.
 
-Agent turns for the same session are serialized inside `AgentService`, so Web,
-CLI, and Scheduler entry points share one concurrency boundary. Concurrent
-cross-process updates remain protected by the SessionStore revision check.
+Agent turns for the same session are serialized by one runtime-owned
+`SessionCoordinator`, so Web, CLI, Scheduler, rename, workspace changes, task
+creation, and deletion share the same lifecycle boundary. A per-session file
+lease extends turn exclusion across processes; SessionStore revision checks
+remain the final stale-write defense.
 
 ## Session attachments
 
@@ -159,7 +168,9 @@ periodic execution remains visible as failed but retains a future trigger. On
 restart, overdue schedules run once instead of replaying every missed interval;
 an execution interrupted by the previous process is closed as failed. Cancelling
 a running task prevents future triggers but lets the current agent turn finish
-and records its outcome.
+and records its outcome. Session deletion fails while active tasks or unresolved
+approvals still refer to it; explicit cascade deletion cancels tasks and pending
+approvals, while approved or executing effects remain a hard safety blocker.
 
 ## Session commands
 
@@ -201,6 +212,19 @@ System prompt and soul changes take effect after restarting the CLI. Memory comm
 
 Each memory is stored as a readable Markdown file under `data/memory/`. Step 3 only supports explicit, manual memory updates; ordinary conversation cannot rewrite stable context.
 
+## Skills
+
+Skills are discovered from packaged and user skill directories, but only their
+name and description enter the initial turn context. A turn can load at most one
+full skill. Users select one explicitly with `/skill <name> <task>` in CLI or the
+WebSocket `skillName` field. The model may instead request `load_skill`; because
+that expands model context, automatic selection requires normal user approval.
+The selected instructions stay turn-local and never leak into later turns.
+
+Use `/skill list`, `/skill show <name>`, and `/skill usage` to inspect the catalog
+and the current session's durable usage records. Each record stores the source,
+selection reason, task, outcome, and final output for auditability.
+
 ## Conversation compaction
 
 Compaction only processes the current session's conversation context. System
@@ -238,8 +262,10 @@ and failure recovery. The summary is session-local and is never shared as memory
 The model receives OpenAI-native function definitions on each normal agent call.
 It can produce a final answer or request tools. The runtime executes at most five
 calls in one batch, appends successful and failed results to the in-progress
-session context, and calls the model again until it produces a final answer.
-There is no total agent-loop iteration limit.
+session context, and calls the model again until it produces a final answer. One
+turn is capped at 12 provider rounds and 30 total tool calls. Reaching either
+budget emits a warning and forces one final tools-disabled provider round instead
+of spinning indefinitely.
 
 Each session can bind one canonical workspace directory. CLI users manage it
 locally with:
@@ -251,9 +277,11 @@ locally with:
 ```
 
 The Web Inspector exposes the same session binding through Gateway APIs. A
-workspace is captured when a turn starts; model-supplied file paths must be
-relative, and canonical resolution rejects absolute paths, `..` escapes, and
-symlink escapes. Filesystem tools fail clearly while no workspace is configured.
+workspace, memory snapshot, attachment catalog, and skill catalog are captured
+when a turn starts. Later tool iterations in that turn see the same stable
+context. Model-supplied file paths must be relative, and canonical resolution
+rejects absolute paths, `..` escapes, and symlink escapes. Filesystem tools fail
+clearly while no workspace is configured.
 
 The read-only catalog contains:
 
@@ -289,8 +317,10 @@ or contradictory terminal states fail the turn without committing partial text.
 
 Tool handlers may be synchronous or asynchronous. Synchronous handlers run in a
 worker thread so they do not block the agent event loop. Every handler has a
-30-second timeout; a timed-out synchronous worker may continue in its thread, but
-the agent receives a timeout observation and can continue reasoning.
+30-second timeout. Read-only timeouts are ordinary failures. Because a timed-out
+synchronous side-effect worker may still finish in its thread, that result is
+recorded as `uncertain` and the turn stops; the model is never told that the
+effect definitely failed.
 
 Session storage retains full tool results. Model requests and trace events use a
 defensive projection: at most 16,384 preview characters per result and 32,768
@@ -309,9 +339,9 @@ Step 8 adds these workspace capabilities:
 
 - `create_file`, `overwrite_file`, and exact-match `edit_file` use atomic writes;
 - `copy_attachment_to_workspace` can copy only a blob owned by the current session;
-- `run_command` lazily creates one persistent shell per session and reuses its cwd,
-  environment, and sourced state; `restart_shell` explicitly resets that state or
-  selects a new starting directory;
+- `new_shell` explicitly creates or resets one persistent shell per session;
+  `run_command` requires that shell and then reuses its cwd, environment, and
+  sourced state;
 - `create_download` snapshots an existing workspace file into a short-lived
   runtime download and returns metadata rather than file contents to the model.
 
@@ -322,11 +352,17 @@ Web displays an approval card and resolves it through Gateway. Denial reasons an
 execution results become ordinary tool observations, so the LLM can continue from
 what actually happened.
 
-Approval records are atomically persisted under `data/approvals/` and also act as
-the execution journal (`pending -> approved/denied -> executing -> succeeded/failed`).
-An execution interrupted by process restart is marked `interrupted` and is never
-replayed automatically. Temporary download blobs live under `data/downloads/`
-and expire after fifteen minutes.
+Approval records are atomically persisted under `data/approvals/`. Side-effect
+execution has a separate journal under `data/executions/` with idempotency keys,
+precondition hashes, terminal results, and a `session_recorded` marker. File
+writes revalidate the approved precondition immediately before execution. On
+restart, an expected post-write hash is reconciled as success, an unchanged file
+as failure, and an ambiguous file or shell effect as `uncertain`; effects are
+never replayed automatically. Recovered terminal outcomes missing from session
+history are appended as an explicit runtime-recovery audit turn. Temporary
+download blobs live under `data/downloads/` and expire after fifteen minutes.
+Pending or approved flows that never started execution expire on restart, and
+their prepared execution records are cancelled rather than resumed.
 
 The shell boundary enforces its canonical cwd before and after each command and
 terminates the shell after timeout, workspace change, or cwd escape. This is not

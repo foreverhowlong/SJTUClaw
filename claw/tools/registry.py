@@ -34,6 +34,7 @@ class ToolResult:
     ok: bool
     value: Any = None
     error: str = ""
+    uncertain: bool = False
 
     def model_content(self) -> str:
         if self.ok:
@@ -42,6 +43,8 @@ class ToolResult:
             payload = {"ok": False, "error": self.error}
             if self.value is not None:
                 payload["result"] = self.value
+            if self.uncertain:
+                payload["uncertain"] = True
         return json.dumps(payload, ensure_ascii=False)
 
 
@@ -202,6 +205,9 @@ class ToolRegistry:
                 call.name,
                 False,
                 error=f"tool 执行超时（{seconds} 秒）。",
+                uncertain=tool.requires_approval and not inspect.iscoroutinefunction(
+                    tool.handler
+                ),
             )
         except Exception as exc:  # Handlers are an isolation boundary.
             logger.exception("tool handler failed: %s", tool.name)
