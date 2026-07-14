@@ -15,6 +15,8 @@ def test_source_runtime_paths_do_not_depend_on_working_directory(
     assert paths.home == Path(__file__).resolve().parent.parent
     assert paths.sessions_dir == paths.home / "data" / "sessions"
     assert paths.tasks_dir == paths.home / "data" / "tasks"
+    assert paths.approvals_dir == paths.home / "data" / "approvals"
+    assert paths.downloads_dir == paths.home / "data" / "downloads"
     assert paths.logs_dir == paths.home / "logs"
 
 

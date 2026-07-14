@@ -6,6 +6,9 @@ from claw.cli_commands import (
     MemoryAdd,
     SessionList,
     SessionRename,
+    WorkspaceClear,
+    WorkspaceSet,
+    WorkspaceShow,
     parse_cli_input,
 )
 from claw.errors import CommandParseError
@@ -27,6 +30,14 @@ def test_double_slash_escapes_a_literal_leading_slash() -> None:
 
 def test_compact_is_a_local_command() -> None:
     assert isinstance(parse_cli_input("/compact"), CompactCommand)
+
+
+def test_workspace_commands_are_parsed_locally() -> None:
+    assert parse_cli_input('/workspace set "/tmp/course project"') == WorkspaceSet(
+        "/tmp/course project"
+    )
+    assert isinstance(parse_cli_input("/workspace show"), WorkspaceShow)
+    assert isinstance(parse_cli_input("/workspace clear"), WorkspaceClear)
 
 
 def test_unknown_and_malformed_commands_raise_parse_error() -> None:

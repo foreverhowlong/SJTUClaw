@@ -14,6 +14,8 @@ class RuntimePaths:
     sessions_dir: Path
     memory_dir: Path
     tasks_dir: Path
+    approvals_dir: Path
+    downloads_dir: Path
     logs_dir: Path
     system_prompt_file: Path | None = None
     soul_file: Path | None = None
@@ -27,6 +29,8 @@ class RuntimePaths:
             sessions_dir=home / "data" / "sessions",
             memory_dir=home / "data" / "memory",
             tasks_dir=home / "data" / "tasks",
+            approvals_dir=home / "data" / "approvals",
+            downloads_dir=home / "data" / "downloads",
             logs_dir=home / "logs",
             system_prompt_file=_optional_path("CLAW_SYSTEM_PROMPT"),
             soul_file=_optional_path("CLAW_SOUL"),

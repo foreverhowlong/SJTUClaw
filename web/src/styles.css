@@ -791,7 +791,7 @@ summary:focus-visible {
   margin: 0 0 18px;
   padding: 6px 9px;
   border: 1px solid var(--ash);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-inner);
   background: var(--parchment);
   color: var(--graphite);
 }
@@ -847,7 +847,8 @@ summary:focus-visible {
 }
 
 .tool-activity-awaiting_approval .tool-status-dot {
-  background: var(--ink);
+  border-color: var(--stone);
+  background: var(--stone);
 }
 
 .tool-activity-line strong {
@@ -891,10 +892,6 @@ summary:focus-visible {
   border-color: var(--charcoal);
   background: var(--charcoal);
   color: var(--parchment);
-}
-
-.tool-activity-failed {
-  border-color: var(--graphite);
 }
 
 .tool-activity-failed .tool-status-dot {
@@ -1524,4 +1521,191 @@ summary:focus-visible {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+.approval-review {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 9px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--ash);
+}
+
+.approval-scope {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+}
+
+.approval-scope-label,
+.approval-details summary,
+.approval-actions button {
+  color: var(--stone);
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.approval-scope-label {
+  flex: none;
+}
+
+.approval-workspace {
+  max-width: 38ch;
+  overflow: hidden;
+  color: var(--graphite);
+  font-size: 9px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding-left: 2px;
+  border-left: 1px solid var(--ash);
+}
+
+.approval-actions button {
+  margin: 0;
+  padding: 1px 4px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  cursor: pointer;
+}
+
+.approval-actions button:hover {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.approval-actions .approval-approve {
+  padding: 4px 7px;
+  background: var(--lime);
+  color: var(--ink);
+}
+
+.approval-actions .approval-approve:hover {
+  background: #b2f044;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.approval-details {
+  min-width: 0;
+}
+
+.approval-details summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.approval-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.approval-details summary::before {
+  content: "+ ";
+}
+
+.approval-details[open] {
+  flex-basis: 100%;
+}
+
+.approval-details[open] summary::before {
+  content: "− ";
+}
+
+.approval-details pre {
+  max-width: 64ch;
+  max-height: 120px;
+  margin: 6px 0 0;
+  padding: 6px 0 1px;
+  overflow: auto;
+  border-top: 1px solid var(--ash);
+  color: var(--graphite);
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.download-button {
+  display: inline-flex;
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--charcoal);
+  color: inherit;
+  background: var(--white);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.workspace-panel input {
+  width: 100%;
+  margin-top: 4px;
+  padding: 10px 11px;
+  border: 1px solid var(--ash);
+  border-radius: var(--radius-input);
+  color: var(--ink);
+  background: var(--white);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.workspace-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.workspace-actions button {
+  min-height: 32px;
+  margin: 0;
+  padding: 0 12px;
+  border-radius: 28px;
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.workspace-set {
+  border: 0;
+  background: var(--lime);
+  color: var(--ink);
+}
+
+.workspace-set:hover:not(:disabled) {
+  background: #b2f044;
+}
+
+.workspace-clear {
+  border: 0;
+  background: transparent;
+  color: var(--graphite);
+}
+
+.workspace-clear:hover:not(:disabled) {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.workspace-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }

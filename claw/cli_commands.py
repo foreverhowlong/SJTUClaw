@@ -70,6 +70,21 @@ class MemoryDelete:
     memory_id: str
 
 
+@dataclass(frozen=True)
+class WorkspaceSet:
+    path: str
+
+
+@dataclass(frozen=True)
+class WorkspaceShow:
+    pass
+
+
+@dataclass(frozen=True)
+class WorkspaceClear:
+    pass
+
+
 CliInput: TypeAlias = (
     ChatInput
     | ExitCommand
@@ -83,6 +98,9 @@ CliInput: TypeAlias = (
     | MemoryAdd
     | MemoryList
     | MemoryDelete
+    | WorkspaceSet
+    | WorkspaceShow
+    | WorkspaceClear
 )
 
 
@@ -98,6 +116,9 @@ HELP_TEXT = """Commands:
   /memory add <content>
   /memory list
   /memory delete <memoryId>
+  /workspace set <path>
+  /workspace show
+  /workspace clear
 Prefix a message with // to send a literal leading slash."""
 
 
@@ -139,6 +160,12 @@ def parse_cli_input(raw: str) -> CliInput | None:
             return MemoryList()
         case ["/memory", "delete", memory_id]:
             return MemoryDelete(memory_id)
+        case ["/workspace", "set", path]:
+            return WorkspaceSet(path)
+        case ["/workspace", "show"]:
+            return WorkspaceShow()
+        case ["/workspace", "clear"]:
+            return WorkspaceClear()
         case _:
             raise CommandParseError(
                 f"未知或格式错误的命令: {text}。输入 /help 查看用法。"

@@ -18,6 +18,7 @@ interface Props {
   connection: ConnectionState;
   loading: boolean;
   onSend: (content: string) => void;
+  onResolveApproval?: (approvalId: string, approved: boolean, reason: string) => Promise<void>;
 }
 
 export function ConversationPane({
@@ -26,6 +27,7 @@ export function ConversationPane({
   connection,
   loading,
   onSend,
+  onResolveApproval,
 }: Props) {
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
@@ -72,6 +74,7 @@ export function ConversationPane({
           <TimelineEntry
             key={timelineKey(item, index, "persisted")}
             item={item}
+            onResolveApproval={onResolveApproval}
           />
         ))}
         {run.pendingUser && (
@@ -81,6 +84,7 @@ export function ConversationPane({
           <TimelineEntry
             key={timelineKey(item, index, "live")}
             item={item}
+            onResolveApproval={onResolveApproval}
             streaming={
               run.running &&
               index === run.liveTimeline.length - 1 &&
@@ -140,11 +144,13 @@ export function ConversationPane({
 function TimelineEntry({
   item,
   streaming = false,
+  onResolveApproval,
 }: {
   item: TimelineItem;
   streaming?: boolean;
+  onResolveApproval?: (approvalId: string, approved: boolean, reason: string) => Promise<void>;
 }) {
-  if (item.type === "tool_activity") return <ToolActivity item={item} />;
+  if (item.type === "tool_activity") return <ToolActivity item={item} onResolveApproval={onResolveApproval} />;
   if (item.type === "runtime_notice") {
     return (
       <article className={`runtime-notice runtime-notice-${item.level}`}>

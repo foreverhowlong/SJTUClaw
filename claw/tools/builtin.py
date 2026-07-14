@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from claw.tools.registry import ToolDefinition, ToolRegistry
+from claw.workspace import Workspace
 
 
 MAX_READ_CHARS = 64 * 1024
@@ -55,6 +56,49 @@ def build_read_only_registry(base_dir: str | Path | None = None) -> ToolRegistry
     return registry
 
 
+def build_workspace_read_only_registry(workspace: Workspace | None) -> ToolRegistry:
+    """Build the read-only catalog against one immutable session workspace."""
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="current_time",
+            description="Return the current local date, time, and UTC offset.",
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            handler=lambda _args: datetime.now().astimezone().isoformat(),
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="list_dir",
+            description="List direct children of a directory in the current workspace.",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "additionalProperties": False,
+            },
+            handler=lambda args: _workspace_list(workspace, args),
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="read_file",
+            description="Read a UTF-8 text file inside the current workspace.",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            handler=lambda args: _workspace_read(workspace, args),
+        )
+    )
+    return registry
+
+
 def _resolve(root: Path, raw_path: str) -> Path:
     path = Path(raw_path).expanduser()
     return path if path.is_absolute() else root / path
@@ -89,4 +133,44 @@ def _read_file(root: Path, args: dict[str, Any]) -> dict[str, Any]:
         "content": content[:MAX_READ_CHARS],
         "truncated": truncated,
         "charactersRead": min(len(content), MAX_READ_CHARS),
+    }
+
+
+def _require_workspace(workspace: Workspace | None) -> Workspace:
+    if workspace is None:
+        from claw.errors import WorkspaceError
+
+        raise WorkspaceError("当前 session 尚未设置 workspace。")
+    return workspace
+
+
+def _workspace_list(
+    workspace: Workspace | None,
+    args: dict[str, Any],
+) -> list[dict[str, str]]:
+    active = _require_workspace(workspace)
+    path = active.resolve(args.get("path", "."), must_exist=True, kind="directory")
+    entries = []
+    for child in sorted(path.iterdir(), key=lambda item: item.name.casefold()):
+        kind = "symlink" if child.is_symlink() else (
+            "directory" if child.is_dir() else "file"
+        )
+        entries.append({"name": child.name, "type": kind})
+    return entries
+
+
+def _workspace_read(
+    workspace: Workspace | None,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    active = _require_workspace(workspace)
+    path = active.resolve(args["path"], must_exist=True, kind="file")
+    with path.open("r", encoding="utf-8") as handle:
+        content = handle.read(MAX_READ_CHARS + 1)
+    visible = content[:MAX_READ_CHARS]
+    return {
+        "path": active.relative(path),
+        "content": visible,
+        "truncated": len(content) > MAX_READ_CHARS,
+        "charactersRead": len(visible),
     }

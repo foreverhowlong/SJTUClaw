@@ -183,6 +183,36 @@ class AttachmentStore:
                 "charactersRead": len(visible),
             }
 
+    def read_bytes(
+        self,
+        session_id: str,
+        attachment_id: str,
+    ) -> tuple[AttachmentMetadata, bytes]:
+        """Return one attachment blob after enforcing session ownership."""
+        self._sessions.load(session_id)
+        if not ATTACHMENT_ID_PATTERN.fullmatch(attachment_id):
+            raise AttachmentError(f"无效的 attachmentId: {attachment_id!r}。")
+        with self._locked(session_id):
+            record = next(
+                (
+                    item
+                    for item in self._read_index(session_id)
+                    if item.attachment_id == attachment_id
+                ),
+                None,
+            )
+            if record is None:
+                raise AttachmentError(
+                    f"当前 session 不存在附件: {attachment_id}。"
+                )
+            path = self._attachment_dir(session_id) / attachment_id
+            if path.is_symlink() or not path.is_file():
+                raise AttachmentError(f"附件 blob 不存在或不安全: {attachment_id}。")
+            try:
+                return record, path.read_bytes()
+            except OSError as exc:
+                raise AttachmentError(f"读取附件失败: {exc}") from exc
+
     def _read_index(self, session_id: str) -> list[AttachmentMetadata]:
         path = self._attachment_dir(session_id) / "index.json"
         if not path.exists():

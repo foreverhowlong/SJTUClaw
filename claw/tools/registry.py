@@ -15,7 +15,7 @@ from claw.tools.schema import validate_arguments, validate_input_schema
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
-SafetyLevel = Literal["read_only", "advanced"]
+SafetyLevel = Literal["read_only", "advanced", "download"]
 DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
 logger = logging.getLogger(__name__)
 
@@ -36,12 +36,20 @@ class ToolResult:
     error: str = ""
 
     def model_content(self) -> str:
-        payload = (
-            {"ok": True, "result": self.value}
-            if self.ok
-            else {"ok": False, "error": self.error}
-        )
+        if self.ok:
+            payload = {"ok": True, "result": self.value}
+        else:
+            payload = {"ok": False, "error": self.error}
+            if self.value is not None:
+                payload["result"] = self.value
         return json.dumps(payload, ensure_ascii=False)
+
+
+@dataclass(frozen=True)
+class PreparedToolCall:
+    call: ToolCall
+    tool: "ToolDefinition"
+    arguments: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -62,7 +70,9 @@ class ToolDefinition:
             raise ToolError(f"read_only tool 不能要求 approval: {self.name}。")
         if self.safety_level == "advanced" and not self.requires_approval:
             raise ToolError(f"advanced tool 必须要求 approval: {self.name}。")
-        if self.safety_level not in {"read_only", "advanced"}:
+        if self.safety_level == "download" and self.requires_approval:
+            raise ToolError(f"download tool 不进入显式 approval: {self.name}。")
+        if self.safety_level not in {"read_only", "advanced", "download"}:
             raise ToolError(f"tool safety level 无效: {self.name}。")
         validate_input_schema(self.name, self.input_schema)
 
@@ -105,9 +115,20 @@ class ToolRegistry:
         return copied
 
     async def execute(self, call: ToolCall, *, approved: bool = False) -> ToolResult:
+        prepared, error = self.prepare(call)
+        if error is not None:
+            return error
+        assert prepared is not None
+        return await self.execute_prepared(prepared, approved=approved)
+
+    def prepare(
+        self,
+        call: ToolCall,
+    ) -> tuple[PreparedToolCall | None, ToolResult | None]:
+        """Resolve and validate a call before asking a user to approve it."""
         tool = self._tools.get(call.name)
         if tool is None:
-            return ToolResult(
+            return None, ToolResult(
                 call.call_id,
                 call.name,
                 False,
@@ -116,7 +137,7 @@ class ToolRegistry:
         try:
             arguments = json.loads(call.arguments or "{}")
         except json.JSONDecodeError as exc:
-            return ToolResult(
+            return None, ToolResult(
                 call.call_id,
                 call.name,
                 False,
@@ -124,7 +145,18 @@ class ToolRegistry:
             )
         error = validate_arguments(arguments, tool.input_schema)
         if error:
-            return ToolResult(call.call_id, call.name, False, error=error)
+            return None, ToolResult(call.call_id, call.name, False, error=error)
+        return PreparedToolCall(call, tool, arguments), None
+
+    async def execute_prepared(
+        self,
+        prepared: PreparedToolCall,
+        *,
+        approved: bool = False,
+    ) -> ToolResult:
+        call = prepared.call
+        tool = prepared.tool
+        arguments = prepared.arguments
         if tool.requires_approval and not approved:
             return ToolResult(
                 call.call_id,
@@ -132,21 +164,25 @@ class ToolRegistry:
                 False,
                 error="该工具需要审批，当前调用未获批准。",
             )
-        if tool.safety_level == "advanced":
-            return ToolResult(
-                call.call_id,
-                call.name,
-                False,
-                error=(
-                    "advanced tool 尚未启用：运行时缺少持久化执行日志和幂等保护。"
-                ),
-            )
         try:
             value = await asyncio.wait_for(
                 _invoke_handler(tool.handler, arguments),
                 timeout=self._timeout_seconds,
             )
             json.dumps(value, ensure_ascii=False)
+            if isinstance(value, dict) and value.get("success") is False:
+                error = value.get("error")
+                return ToolResult(
+                    call.call_id,
+                    call.name,
+                    False,
+                    value=value,
+                    error=(
+                        error
+                        if isinstance(error, str) and error
+                        else "tool reported an unsuccessful operation"
+                    ),
+                )
         except TimeoutError:
             # Cancelling to_thread stops our wait, not the underlying worker thread.
             logger.warning(

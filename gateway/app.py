@@ -19,7 +19,9 @@ from pydantic import BaseModel, ConfigDict
 
 from claw.errors import (
     AttachmentError,
+    ApprovalError,
     ClawError,
+    DownloadError,
     SessionError,
     TaskConflictError,
     TaskError,
@@ -32,6 +34,9 @@ from claw.session import Session
 from claw.store.sessions import SessionSummary
 from gateway.realtime import GatewayConnection, GatewayConnectionHub
 from gateway.task_routes import router as task_router
+from gateway.approval_routes import router as approval_router
+from gateway.download_routes import router as download_router
+from gateway.workspace_routes import router as workspace_router
 
 
 logger = logging.getLogger(__name__)
@@ -79,7 +84,7 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=_cors_origins(),
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PATCH", "DELETE"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["Content-Type"],
     )
 
@@ -93,6 +98,16 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
     async def handle_attachment_error(_request: Request, exc: AttachmentError):
         status = 413 if "大小限制" in str(exc) else 400
         return _error_response(status, "attachment_error", str(exc))
+
+    @app.exception_handler(ApprovalError)
+    async def handle_approval_error(_request: Request, exc: ApprovalError):
+        status = 404 if "不存在" in str(exc) else 409
+        return _error_response(status, "approval_error", str(exc))
+
+    @app.exception_handler(DownloadError)
+    async def handle_download_error(_request: Request, exc: DownloadError):
+        status = 404 if "不存在" in str(exc) or "过期" in str(exc) else 400
+        return _error_response(status, "download_error", str(exc))
 
     @app.exception_handler(TaskNotFoundError)
     async def handle_task_not_found(_request: Request, exc: TaskNotFoundError):
@@ -145,6 +160,8 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
     @app.delete("/api/sessions/{session_id}", status_code=204)
     async def delete_session(session_id: str, request: Request) -> Response:
         async with _session_lock(request.app, session_id):
+            if hasattr(_runtime(request), "shell_manager"):
+                await _runtime(request).shell_manager.close(session_id)
             _runtime(request).session_store.delete(session_id)
         return Response(status_code=204)
 
@@ -239,6 +256,9 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
             _connection_hub(websocket.app).disconnect(connection)
 
     app.include_router(task_router)
+    app.include_router(workspace_router)
+    app.include_router(approval_router)
+    app.include_router(download_router)
 
     web_dist = Path(__file__).resolve().parent.parent / "web" / "dist"
     if web_dist.is_dir():
@@ -275,6 +295,7 @@ def _session_detail(session: Session) -> dict[str, Any]:
         "updatedAt": session.updated_at.isoformat(),
         "revision": session.revision,
         "summary": session.summary,
+        "workspace": session.workspace,
         "messages": session.messages,
         "timeline": build_conversation_timeline(session.messages),
     }
@@ -320,13 +341,20 @@ def _web_event(
         else:
             status = "running" if payload["approved"] else "failed"
             error = "" if payload["approved"] else str(payload["reason"])
-        payload["timelineItem"] = tool_activity(
+        item = tool_activity(
             call_id,
             name,
             arguments,
             status=status,
             error=error,
         )
+        if event.type == "approval_required":
+            item["approval"] = {
+                "approvalId": payload.get("approvalId"),
+                "arguments": payload.get("arguments", {}),
+                "workspace": payload.get("workspace"),
+            }
+        payload["timelineItem"] = item
     return rendered
 
 

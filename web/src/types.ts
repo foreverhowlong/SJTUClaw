@@ -20,6 +20,7 @@ export interface ConversationMessage {
 export interface SessionDetail extends SessionSummary {
   revision: number;
   summary: string;
+  workspace: string | null;
   messages: ConversationMessage[];
   timeline: PersistedTimelineItem[];
 }
@@ -45,6 +46,17 @@ export interface ToolActivityItem {
   status: ToolActivityStatus;
   detail: string;
   error: string;
+  approval?: {
+    approvalId: string;
+    arguments: Record<string, unknown>;
+    workspace: string | null;
+  };
+  download?: {
+    downloadId: string;
+    downloadUrl: string;
+    filename: string;
+    expiresAt: string;
+  };
 }
 
 export interface RuntimeNoticeItem {

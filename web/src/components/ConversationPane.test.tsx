@@ -21,7 +21,8 @@ function detail(timeline: PersistedTimelineItem[]): SessionDetail {
     createdAt: "2026-07-13T00:00:00Z",
     updatedAt: "2026-07-13T00:00:00Z",
     revision: 1,
-    summary: "",
+  summary: "",
+  workspace: null,
     messages: [],
     timeline,
   };

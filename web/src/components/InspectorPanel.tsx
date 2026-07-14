@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type {
   AttachmentMetadata,
@@ -16,7 +16,9 @@ interface Props {
   tasks: ScheduledTask[];
   tasksLoading: boolean;
   disabled: boolean;
+  workspace: string | null;
   onUpload: (file: File) => Promise<void>;
+  onSetWorkspace: (path: string | null) => Promise<void>;
   onCreateTask: (input: CreateScheduledTaskInput) => Promise<unknown>;
   onCancelTask: (taskId: string) => Promise<unknown>;
   onClose: () => void;
@@ -30,14 +32,19 @@ export function InspectorPanel({
   tasks,
   tasksLoading,
   disabled,
+  workspace,
   onUpload,
+  onSetWorkspace,
   onCreateTask,
   onCancelTask,
   onClose,
 }: Props) {
   const [uploading, setUploading] = useState(false);
-  const [tab, setTab] = useState<"files" | "tasks">("files");
+  const [tab, setTab] = useState<"files" | "tasks" | "workspace">("files");
+  const [workspaceDraft, setWorkspaceDraft] = useState(workspace ?? "");
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => setWorkspaceDraft(workspace ?? ""), [workspace]);
 
   const selectFile = async (file?: File) => {
     if (!file) return;
@@ -54,8 +61,8 @@ export function InspectorPanel({
     <aside className={`inspector drawer-panel ${className}`}>
       <div className="inspector-topline">
         <div className="inspector-title">
-          <span className="micro-label">{tab === "files" ? "SESSION FILES" : "TASKS"}</span>
-          <span className="file-count">{tab === "files" ? attachments.length : tasks.length}</span>
+          <span className="micro-label">{tab === "files" ? "SESSION FILES" : tab === "tasks" ? "TASKS" : "WORKSPACE"}</span>
+          <span className="file-count">{tab === "files" ? attachments.length : tab === "tasks" ? tasks.length : workspace ? 1 : 0}</span>
         </div>
         <button className="drawer-close" type="button" onClick={onClose} aria-label="关闭">
           ×
@@ -80,8 +87,46 @@ export function InspectorPanel({
           >
             TASKS
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "workspace"}
+            onClick={() => setTab("workspace")}
+          >
+            WORKSPACE
+          </button>
         </div>
-        {tab === "files" ? <div className="files-panel">
+        {tab === "workspace" ? (
+          <div className="files-panel workspace-panel">
+            <span className="micro-label">SESSION WORKSPACE</span>
+            <p className="muted-copy">当前：{workspace ?? "尚未设置"}</p>
+            <input
+              aria-label="Workspace path"
+              value={workspaceDraft}
+              onChange={(event) => setWorkspaceDraft(event.target.value)}
+              placeholder="/absolute/server/path"
+              disabled={disabled}
+            />
+            <div className="workspace-actions">
+              <button
+                className="workspace-set"
+                type="button"
+                disabled={disabled || !workspaceDraft.trim()}
+                onClick={() => void onSetWorkspace(workspaceDraft.trim())}
+              >
+                SET WORKSPACE
+              </button>
+              <button
+                className="workspace-clear"
+                type="button"
+                disabled={disabled || !workspace}
+                onClick={() => void onSetWorkspace(null)}
+              >
+                CLEAR
+              </button>
+            </div>
+          </div>
+        ) : tab === "files" ? <div className="files-panel">
         <div className="files-intro">
           <span className="micro-label">SESSION ATTACHMENTS</span>
           <p>附件只属于当前 session，不会成为 workspace 文件。</p>

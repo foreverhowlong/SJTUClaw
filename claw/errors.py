@@ -29,6 +29,22 @@ class AttachmentError(ClawError):
     """Raised when a session attachment cannot be stored or read safely."""
 
 
+class WorkspaceError(ClawError):
+    """Raised when a session workspace is missing or a path escapes it."""
+
+
+class ApprovalError(ClawError):
+    """Raised when an approval request cannot make a valid transition."""
+
+
+class DownloadError(ClawError):
+    """Raised when a temporary download cannot be registered or opened."""
+
+
+class ShellError(ClawError):
+    """Raised when a managed workspace shell cannot be controlled safely."""
+
+
 class MemoryError(ClawError):
     """Raised when long-term memory cannot be loaded or persisted safely."""
 

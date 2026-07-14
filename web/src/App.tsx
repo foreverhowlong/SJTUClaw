@@ -7,6 +7,8 @@ import {
   listAttachments,
   listSessions,
   renameSession as renameSessionRequest,
+  resolveApproval,
+  setWorkspace,
   uploadAttachment,
 } from "./api";
 import { ConversationPane } from "./components/ConversationPane";
@@ -259,6 +261,24 @@ export default function App() {
     [activeSessionId],
   );
 
+  const handleResolveApproval = useCallback(async (approvalId: string, approved: boolean, reason: string) => {
+    try {
+      await resolveApproval(approvalId, approved, reason);
+    } catch (failure) {
+      setError(errorMessage(failure));
+    }
+  }, []);
+
+  const handleSetWorkspace = useCallback(async (path: string | null) => {
+    if (!activeSessionId) return;
+    try {
+      await setWorkspace(activeSessionId, path);
+      await loadSession(activeSessionId);
+    } catch (failure) {
+      setError(errorMessage(failure));
+    }
+  }, [activeSessionId, loadSession]);
+
   const activeDetail = activeSessionId ? details[activeSessionId] : undefined;
   const activeRun = activeSessionId
     ? runs[activeSessionId] ?? EMPTY_RUN
@@ -348,6 +368,7 @@ export default function App() {
             connection={connection}
             loading={loading}
             onSend={handleSend}
+            onResolveApproval={handleResolveApproval}
           />
           <InspectorPanel
             className={rightOpen ? "is-open" : ""}
@@ -357,7 +378,9 @@ export default function App() {
             tasks={scheduled.tasks}
             tasksLoading={scheduled.loading}
             disabled={!activeSessionId}
+            workspace={activeDetail?.workspace ?? null}
             onUpload={handleUpload}
+            onSetWorkspace={handleSetWorkspace}
             onCreateTask={scheduled.create}
             onCancelTask={scheduled.cancel}
             onClose={() => setRightOpen(false)}

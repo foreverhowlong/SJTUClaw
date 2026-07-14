@@ -200,7 +200,7 @@ def test_registry_returns_timeout_observation() -> None:
     assert result.error == "tool 执行超时（0.01 秒）。"
 
 
-def test_advanced_tools_remain_disabled_even_after_approval() -> None:
+def test_advanced_tools_require_approval_and_execute_after_approval() -> None:
     executed = []
     advanced = ToolDefinition(
         "write_file",
@@ -221,8 +221,8 @@ def test_advanced_tools_remain_disabled_even_after_approval() -> None:
     )
 
     assert denied.ok is False and "未获批准" in denied.error
-    assert approved.ok is False and "执行日志" in approved.error
-    assert executed == []
+    assert approved.ok is True
+    assert executed == [True]
 
 
 def test_tool_definition_rejects_invalid_safety_combinations() -> None:

@@ -75,6 +75,29 @@ export function uploadAttachment(
   );
 }
 
+export function setWorkspace(
+  sessionId: string,
+  path: string | null,
+): Promise<{ sessionId: string; workspace: string | null }> {
+  return request(`/api/sessions/${sessionId}/workspace`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+}
+
+export function resolveApproval(
+  approvalId: string,
+  approved: boolean,
+  reason = "",
+): Promise<unknown> {
+  return request(`/api/approvals/${approvalId}/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approved, reason }),
+  });
+}
+
 export async function listScheduledTasks(): Promise<ScheduledTask[]> {
   const body = await request<{ tasks: ScheduledTask[] }>("/api/tasks");
   return body.tasks;

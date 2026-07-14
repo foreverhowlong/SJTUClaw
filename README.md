@@ -1,6 +1,6 @@
 # SJTUClaw
 
-SJTUClaw is a minimal agent runtime course project. The current implementation covers Step 7: persistent multi-session context, safe compaction, streamed OpenAI-compatible tool calling, a read-only environment feedback loop, a shared FastAPI Gateway with a React command center, and persistent once/interval scheduled tasks.
+SJTUClaw is a minimal agent runtime course project. The current implementation covers Step 8: persistent multi-session context, safe compaction, streamed OpenAI-compatible tool calling, a shared FastAPI Gateway with a React command center, persistent scheduled tasks, and session-scoped workspace tools with explicit approval for side effects.
 
 ## Setup
 
@@ -93,6 +93,9 @@ The REST surface is intentionally small:
 - `DELETE /api/sessions/{sessionId}` deletes a session and its attachments.
 - `GET /api/sessions/{sessionId}` returns persisted history.
 - `GET/POST /api/sessions/{sessionId}/attachments` lists or uploads attachments.
+- `GET/PUT /api/sessions/{sessionId}/workspace` reads or changes the session workspace.
+- `GET /api/approvals` lists approval records; `POST /api/approvals/{approvalId}/resolve` approves or denies one pending request.
+- `GET /api/downloads/{downloadId}` returns an unexpired download snapshot.
 - `GET/POST /api/tasks` lists or creates persistent tasks.
 - `GET /api/tasks/{taskId}` returns one task with its complete execution history.
 - `POST /api/tasks/{taskId}/cancel` cancels all future triggers without deleting history.
@@ -230,7 +233,7 @@ Compaction is persisted as a revisioned record in the session's append-only
 retained messages as active context; earlier records remain available for audit
 and failure recovery. The summary is session-local and is never shared as memory.
 
-## Read-only tools and agent loop
+## Workspace, tools, and approval
 
 The model receives OpenAI-native function definitions on each normal agent call.
 It can produce a final answer or request tools. The runtime executes at most five
@@ -238,15 +241,29 @@ calls in one batch, appends successful and failed results to the in-progress
 session context, and calls the model again until it produces a final answer.
 There is no total agent-loop iteration limit.
 
-Step 5 provides three workspace-oriented read-only tools:
+Each session can bind one canonical workspace directory. CLI users manage it
+locally with:
+
+```text
+/workspace set <path>
+/workspace show
+/workspace clear
+```
+
+The Web Inspector exposes the same session binding through Gateway APIs. A
+workspace is captured when a turn starts; model-supplied file paths must be
+relative, and canonical resolution rejects absolute paths, `..` escapes, and
+symlink escapes. Filesystem tools fail clearly while no workspace is configured.
+
+The read-only catalog contains:
 
 - `current_time {}` returns local time with its UTC offset.
 - `list_dir {"path":"."}` lists one directory level in stable name order.
 - `read_file {"path":"README.md"}` reads UTF-8 text and caps returned content at
   65,536 characters.
 
-Relative tool paths are resolved from the process working directory. Step 5 does
-not reinterpret them relative to the runtime data directory.
+`list_dir` and `read_file` resolve paths against the current session workspace,
+never against the Gateway process cwd or runtime data directory.
 
 Gateway turns also receive a session-scoped attachment reader when the
 `AttachmentStore` is available:
@@ -288,16 +305,33 @@ A completed agent turn is committed atomically as one append-only JSONL record:
 user -> assistant(tool_calls) -> tool results -> ... -> assistant(final)
 ```
 
-This step intentionally has no workspace sandbox or sensitive-file filter. It
-does not expose write, edit, delete, shell, package, Git, or messaging tools.
-Advanced definitions are nevertheless fail-closed: they must declare approval,
-the default policy denies them, and the registry refuses execution even after an
-approval because Step 5 has no durable execution journal or idempotency protection.
+Step 8 adds these workspace capabilities:
 
-Atomic commit-at-end is safe for the current read-only tools. M7 may enable
-side-effecting tools only after approval is paired with a durable execution journal
-or idempotency keys, so a successful side effect cannot disappear after a failed
-turn commit.
+- `create_file`, `overwrite_file`, and exact-match `edit_file` use atomic writes;
+- `copy_attachment_to_workspace` can copy only a blob owned by the current session;
+- `new_shell` creates one persistent shell per session and `run_command` reuses its
+  cwd, environment, and sourced state;
+- `create_download` snapshots an existing workspace file into a short-lived
+  runtime download and returns metadata rather than file contents to the model.
+
+Update, attachment-copy, and shell calls are prepared and schema-validated before
+an approval is created. The runtime emits the complete approval ID, arguments,
+and workspace, then suspends on an `asyncio.Future`. CLI prompts for a decision;
+Web displays an approval card and resolves it through Gateway. Denial reasons and
+execution results become ordinary tool observations, so the LLM can continue from
+what actually happened.
+
+Approval records are atomically persisted under `data/approvals/` and also act as
+the execution journal (`pending -> approved/denied -> executing -> succeeded/failed`).
+An execution interrupted by process restart is marked `interrupted` and is never
+replayed automatically. Temporary download blobs live under `data/downloads/`
+and expire after fifteen minutes.
+
+The shell boundary enforces its canonical cwd before and after each command and
+terminates the shell after timeout, workspace change, or cwd escape. This is not
+a container or OS sandbox: arbitrary approved commands can explicitly address
+resources outside cwd. Approval is therefore the safety boundary for command
+effects.
 
 ## Runtime paths
 

@@ -11,6 +11,7 @@ from typing import Protocol, TextIO
 from prompt_toolkit import PromptSession
 
 from claw.agent import AgentService
+from claw.approval import ApprovalCoordinator
 from claw.cli_commands import (
     HELP_TEXT,
     ChatInput,
@@ -25,6 +26,9 @@ from claw.cli_commands import (
     SessionNew,
     SessionRename,
     SessionSwitch,
+    WorkspaceClear,
+    WorkspaceSet,
+    WorkspaceShow,
     parse_cli_input,
 )
 from claw.compaction import CompactionResult
@@ -37,8 +41,10 @@ from claw.presentation.timeline import (
 )
 from claw.runtime import build_runtime
 from claw.session import Session
+from claw.shell import ShellManager
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
+from claw.workspace import WorkspaceService
 
 
 _prompt_session: PromptSession[str] | None = None
@@ -60,6 +66,9 @@ async def run_repl(
     agent: AgentRuntime,
     session_store: SessionStore,
     memory_store: MemoryStore,
+    workspace_service: WorkspaceService | None = None,
+    approval_coordinator: ApprovalCoordinator | None = None,
+    shell_manager: ShellManager | None = None,
     *,
     initial_session_id: str | None = None,
     input_fn: InputFunction | None = None,
@@ -105,6 +114,8 @@ async def run_repl(
                     agent.run_turn(current_session_id, parsed.content),
                     output,
                     error_output,
+                    approval_coordinator=approval_coordinator,
+                    input_fn=read_input,
                 )
             elif isinstance(parsed, CompactCommand):
                 result = await agent.compact_session(current_session_id, force=True)
@@ -125,6 +136,8 @@ async def run_repl(
                 print(f"Renamed session: {session.session_id}  {session.title}", file=output)
             elif isinstance(parsed, SessionDelete):
                 deleting_current = parsed.session_id == current_session_id
+                if shell_manager is not None:
+                    await shell_manager.close(parsed.session_id)
                 session_store.delete(parsed.session_id)
                 print(f"Deleted session: {parsed.session_id}", file=output)
                 if deleting_current:
@@ -139,6 +152,19 @@ async def run_repl(
             elif isinstance(parsed, MemoryDelete):
                 memory_store.delete(parsed.memory_id)
                 print(f"Deleted memory: {parsed.memory_id}", file=output)
+            elif isinstance(parsed, WorkspaceSet):
+                if workspace_service is None:
+                    raise ClawError("当前 CLI 未配置 workspace service。")
+                session = workspace_service.set(current_session_id, parsed.path)
+                print(f"Workspace: {session.workspace}", file=output)
+            elif isinstance(parsed, WorkspaceShow):
+                session = session_store.load(current_session_id)
+                print(f"Workspace: {session.workspace or '(not set)'}", file=output)
+            elif isinstance(parsed, WorkspaceClear):
+                if workspace_service is None:
+                    raise ClawError("当前 CLI 未配置 workspace service。")
+                workspace_service.clear(current_session_id)
+                print("Workspace cleared.", file=output)
         except KeyboardInterrupt:
             print("\n已中断。", file=error_output)
             return 130
@@ -229,6 +255,9 @@ async def _render_turn(
     events: AsyncIterator[AgentEvent],
     output: TextIO,
     error_output: TextIO,
+    *,
+    approval_coordinator: ApprovalCoordinator | None = None,
+    input_fn: InputFunction | None = None,
 ) -> None:
     streaming = False
     tool_calls: dict[str, tuple[str, str]] = {}
@@ -286,6 +315,32 @@ async def _render_turn(
                 ),
                 file=output,
             )
+            approval_id = event.payload.get("approvalId")
+            if (
+                approval_coordinator is not None
+                and input_fn is not None
+                and isinstance(approval_id, str)
+            ):
+                print(f"Approval: {approval_id}", file=output)
+                print(f"Arguments: {event.payload.get('arguments', {})}", file=output)
+                print(f"Workspace: {event.payload.get('workspace') or '(not set)'}", file=output)
+                entered = input_fn("Approve? [y/N] ")
+                answer = await entered if inspect.isawaitable(entered) else entered
+                approved = answer.strip().lower() in {"y", "yes"}
+                reason = ""
+                if not approved:
+                    entered_reason = input_fn("Reason (optional)> ")
+                    reason_value = (
+                        await entered_reason
+                        if inspect.isawaitable(entered_reason)
+                        else entered_reason
+                    )
+                    reason = reason_value.strip()
+                approval_coordinator.resolve(
+                    approval_id,
+                    approved=approved,
+                    reason=reason,
+                )
         elif event.type == "approval_resolved":
             # The following tool_result is the durable, user-relevant outcome.
             continue
@@ -344,6 +399,9 @@ def main(argv: list[str] | None = None) -> int:
                 runtime.agent,
                 runtime.session_store,
                 runtime.memory_store,
+                runtime.workspace_service,
+                runtime.approval_coordinator,
+                runtime.shell_manager,
             )
         )
     except KeyboardInterrupt:

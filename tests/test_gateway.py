@@ -10,9 +10,13 @@ from starlette.testclient import TestClient
 from claw.events import AgentEvent
 from claw.scheduler import Scheduler
 from claw.store.attachments import AttachmentStore
+from claw.approval import ApprovalCoordinator
+from claw.store.approvals import ApprovalStore
+from claw.store.downloads import DownloadStore
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
 from claw.store.tasks import TaskStore
+from claw.workspace import WorkspaceService
 from gateway.app import create_app
 
 
@@ -107,6 +111,16 @@ def make_runtime(tmp_path) -> FakeRuntime:
             poll_interval_seconds=60,
         ),
     )
+
+
+def add_task8_services(runtime, tmp_path) -> None:
+    runtime.workspace_service = WorkspaceService(runtime.session_store)
+    runtime.approval_store = ApprovalStore(tmp_path / "approvals")
+    runtime.approval_coordinator = ApprovalCoordinator(
+        runtime.approval_store,
+        timeout_seconds=1,
+    )
+    runtime.download_store = DownloadStore(tmp_path / "downloads")
 
 
 def test_rest_sessions_share_the_runtime_store(tmp_path) -> None:
@@ -432,3 +446,43 @@ def test_task_api_rejects_missing_session_and_past_time(tmp_path) -> None:
 
     assert missing.status_code == 404
     assert expired.status_code == 400
+
+
+def test_workspace_approval_and_download_routes_use_runtime_services(tmp_path) -> None:
+    runtime = make_runtime(tmp_path)
+    add_task8_services(runtime, tmp_path)
+    session = runtime.session_store.create()
+    project = tmp_path / "project"
+    project.mkdir()
+    output = project / "report.md"
+    output.write_text("ready", encoding="utf-8")
+    approval = runtime.approval_store.create(
+        session.session_id,
+        "call_1",
+        "create_file",
+        {"path": "note.txt", "content": "hello"},
+        str(project),
+    )
+    download = runtime.download_store.create(session.session_id, output)
+
+    with TestClient(create_app(runtime)) as client:
+        workspace = client.put(
+            f"/api/sessions/{session.session_id}/workspace",
+            json={"path": str(project)},
+        )
+        pending = client.get(
+            "/api/approvals",
+            params={"sessionId": session.session_id, "status": "pending"},
+        )
+        resolved = client.post(
+            f"/api/approvals/{approval.approval_id}/resolve",
+            json={"approved": False, "reason": "not now"},
+        )
+        downloaded = client.get(f"/api/downloads/{download.download_id}")
+
+    assert workspace.status_code == 200
+    assert workspace.json()["workspace"] == str(project.resolve())
+    assert pending.json()["approvals"][0]["approvalId"] == approval.approval_id
+    assert resolved.json()["status"] == "denied"
+    assert downloaded.content == b"ready"
+    assert "report.md" in downloaded.headers["content-disposition"]

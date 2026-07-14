@@ -20,10 +20,13 @@ class Session:
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     revision: int = 0
     summary: str = ""
+    workspace: str | None = None
     _messages: tuple[Message, ...] = field(default_factory=tuple, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "summary", self.summary.strip())
+        normalized_workspace = self.workspace.strip() if self.workspace else None
+        object.__setattr__(self, "workspace", normalized_workspace or None)
         object.__setattr__(
             self,
             "_messages",

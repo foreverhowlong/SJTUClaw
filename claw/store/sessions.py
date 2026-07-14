@@ -127,6 +127,7 @@ class SessionStore:
                 updated_at=committed_at,
                 revision=snapshot.revision + 1,
                 summary=snapshot.summary,
+                workspace=snapshot.workspace,
                 _messages=tuple([*snapshot.messages, *committed_messages]),
             )
 
@@ -178,6 +179,7 @@ class SessionStore:
                 updated_at=compacted_at,
                 revision=snapshot.revision + 1,
                 summary=normalized_summary,
+                workspace=snapshot.workspace,
                 _messages=tuple(retained),
             )
 
@@ -195,6 +197,7 @@ class SessionStore:
                 updated_at=datetime.now(timezone.utc),
                 revision=snapshot.revision,
                 summary=snapshot.summary,
+                workspace=snapshot.workspace,
                 _messages=tuple(snapshot.messages),
             )
             try:
@@ -205,6 +208,32 @@ class SessionStore:
             except (OSError, TypeError, ValueError) as exc:
                 raise SessionError(f"重命名 session {session_id} 失败: {exc}") from exc
             return renamed
+
+    def set_workspace(self, session_id: str, workspace: str | None) -> Session:
+        """Persist the canonical workspace binding without changing message revision."""
+        normalized = workspace.strip() if workspace else None
+        with self._locked(session_id):
+            snapshot = self._load_unlocked(session_id)
+            updated = Session(
+                session_id=snapshot.session_id,
+                title=snapshot.title,
+                created_at=snapshot.created_at,
+                updated_at=datetime.now(timezone.utc),
+                revision=snapshot.revision,
+                summary=snapshot.summary,
+                workspace=normalized or None,
+                _messages=tuple(snapshot.messages),
+            )
+            try:
+                self._atomic_write(
+                    self._session_dir(session_id) / "meta.json",
+                    self._serialize_meta(updated),
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                raise SessionError(
+                    f"更新 session {session_id} workspace 失败: {exc}"
+                ) from exc
+            return updated
 
     def delete(self, session_id: str) -> None:
         with self._locked(session_id):
@@ -246,6 +275,7 @@ class SessionStore:
             updated_at=updated_at,
             revision=log.revision,
             summary=log.summary,
+            workspace=_read_optional_workspace(meta, meta_path),
             _messages=log.messages,
         )
 
@@ -341,6 +371,7 @@ class SessionStore:
                 "title": session.title,
                 "createdAt": session.created_at.isoformat(),
                 "updatedAt": session.updated_at.isoformat(),
+                "workspace": session.workspace,
             },
             ensure_ascii=False,
             indent=2,
@@ -360,3 +391,12 @@ class SessionStore:
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def _read_optional_workspace(meta: dict[str, Any], path: Path) -> str | None:
+    value = meta.get("workspace")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise SessionError(f"Session 数据损坏: {path} 中的 workspace 无效。")
+    return value.strip()

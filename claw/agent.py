@@ -11,7 +11,15 @@ from typing import Protocol
 from claw.approval import ApprovalPolicy, DenyAllPolicy
 from claw.compaction import CompactionResult, Compactor, serialized_request_chars
 from claw.context import ContextBuilder, TOOL_RESULT_PREVIEW_CHARS
-from claw.errors import LLMError, SessionError, ToolError
+from claw.errors import (
+    ApprovalError,
+    DownloadError,
+    LLMError,
+    SessionError,
+    ShellError,
+    ToolError,
+    WorkspaceError,
+)
 from claw.events import AgentEvent
 from claw.llm import LLMStreamEvent
 from claw.messages import Message, MessageSource, TextMessage
@@ -20,6 +28,7 @@ from claw.store.attachments import AttachmentStore
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
 from claw.tools import ToolCall, ToolRegistry, ToolResult, build_read_only_registry
+from claw.tools.factory import SessionToolProvider
 from claw.tools.attachment import (
     READ_ATTACHMENT_TOOL_NAME,
     build_read_attachment_tool,
@@ -53,6 +62,7 @@ class AgentService:
         tool_registry: ToolRegistry | None = None,
         approval_policy: ApprovalPolicy | None = None,
         attachment_store: AttachmentStore | None = None,
+        tool_provider: SessionToolProvider | None = None,
     ) -> None:
         self._llm = llm
         self._store = store
@@ -62,6 +72,7 @@ class AgentService:
         self._tools = tool_registry or build_read_only_registry()
         self._approval_policy = approval_policy or DenyAllPolicy()
         self._attachment_store = attachment_store
+        self._tool_provider = tool_provider
         self._session_locks: dict[str, asyncio.Lock] = {}
 
     async def run_turn(
@@ -87,14 +98,16 @@ class AgentService:
     ) -> AsyncIterator[AgentEvent]:
 
         yield AgentEvent("turn_start", session_id, {"userInput": user_input})
+        snapshot: Session | None = None
+        working: list[Message] = []
         try:
-            tools = self._tools_for_session(session_id)
-            definitions = tools.definitions()
             user_message: TextMessage = {"role": "user", "content": user_input}
             if source is not None:
                 user_message["source"] = source
-            working: list[Message] = [user_message]
+            working = [user_message]
             snapshot = self._store.load(session_id)
+            tools = self._tools_for_session(snapshot)
+            definitions = tools.definitions()
             if self._compactor is not None:
                 request_chars = self._request_chars(
                     session_id, snapshot, working, definitions
@@ -139,10 +152,24 @@ class AgentService:
                 yield event
             yield AgentEvent("turn_end", session_id, {"status": "completed"})
         except asyncio.CancelledError:
+            _commit_interrupted_tool_turn(
+                self._store,
+                session_id,
+                snapshot,
+                working,
+                "工具流程已中断；已完成的 tool result 保留在会话中。",
+            )
             raise
         except Exception as exc:
             logger.exception("agent turn failed: session=%s", session_id)
             code, message = _public_error(exc)
+            _commit_interrupted_tool_turn(
+                self._store,
+                session_id,
+                snapshot,
+                working,
+                f"{message} 已完成的 tool result 已保留。",
+            )
             yield AgentEvent(
                 "error",
                 session_id,
@@ -161,12 +188,15 @@ class AgentService:
             if self._attachment_store is not None
             else ()
         )
-        return self._context_builder.build(
+        arguments = (
             [*snapshot.messages, *working],
             self._memory_store.list(),
             snapshot.summary,
             attachments,
         )
+        if self._tool_provider is None:
+            return self._context_builder.build(*arguments)
+        return self._context_builder.build(*arguments, workspace=snapshot.workspace)
 
     def _request_chars(
         self,
@@ -178,13 +208,17 @@ class AgentService:
         messages = self._build_context(session_id, snapshot, working)
         return serialized_request_chars(messages, definitions)
 
-    def _tools_for_session(self, session_id: str) -> ToolRegistry:
+    def _tools_for_session(self, session: Session) -> ToolRegistry:
+        if self._tool_provider is not None:
+            return self._tool_provider.for_session(session)
         tools = self._tools.clone()
         if self._attachment_store is None:
             return tools
         if tools.get(READ_ATTACHMENT_TOOL_NAME) is not None:
             raise ToolError(f"tool 已注册: {READ_ATTACHMENT_TOOL_NAME}。")
-        tools.register(build_read_attachment_tool(self._attachment_store, session_id))
+        tools.register(
+            build_read_attachment_tool(self._attachment_store, session.session_id)
+        )
         return tools
 
     async def _run_loop(
@@ -219,6 +253,7 @@ class AgentService:
                     working,
                     completion.tool_calls,
                     tools,
+                    workspace=snapshot.workspace,
                 ):
                     yield event
                 continue
@@ -241,6 +276,8 @@ class AgentService:
         working: list[Message],
         calls: tuple[ToolCall, ...],
         tools: ToolRegistry,
+        *,
+        workspace: str | None,
     ) -> AsyncIterator[AgentEvent]:
         oversized = len(calls) > MAX_TOOL_CALLS_PER_BATCH
         for call in calls:
@@ -250,6 +287,7 @@ class AgentService:
                 call,
                 tools,
                 oversized=oversized,
+                workspace=workspace,
             ):
                 yield event
 
@@ -261,6 +299,7 @@ class AgentService:
         tools: ToolRegistry,
         *,
         oversized: bool,
+        workspace: str | None,
     ) -> AsyncIterator[AgentEvent]:
         yield AgentEvent(
             "tool_call",
@@ -281,34 +320,57 @@ class AgentService:
             )
             return
 
-        tool = tools.get(call.name)
-        if tool is None or not tool.requires_approval:
-            result = await tools.execute(call)
+        prepared, preparation_error = tools.prepare(call)
+        if preparation_error is not None:
+            result = preparation_error
+        elif prepared is not None and not prepared.tool.requires_approval:
+            result = await tools.execute_prepared(prepared)
         else:
+            assert prepared is not None
+            request = self._approval_policy.create(
+                session_id,
+                prepared,
+                workspace,
+            )
             yield AgentEvent(
                 "approval_required",
                 session_id,
-                {"callId": call.call_id, "name": call.name},
+                {
+                    "approvalId": request.approval_id,
+                    "callId": call.call_id,
+                    "name": call.name,
+                    "arguments": prepared.arguments,
+                    "workspace": workspace,
+                },
             )
-            decision = await self._approval_policy.authorize(session_id, tool, call)
+            decision = await self._approval_policy.wait(request.approval_id)
             yield AgentEvent(
                 "approval_resolved",
                 session_id,
                 {
                     "callId": call.call_id,
                     "name": call.name,
+                    "approvalId": request.approval_id,
                     "approved": decision.approved,
                     "reason": decision.reason,
                 },
             )
             if decision.approved:
-                result = await tools.execute(call, approved=True)
+                self._approval_policy.record_execution_started(request.approval_id)
+                result = await tools.execute_prepared(prepared, approved=True)
+                self._approval_policy.record_execution_result(
+                    request.approval_id,
+                    result,
+                )
             else:
                 result = ToolResult(
                     call.call_id,
                     call.name,
                     False,
-                    error=decision.reason,
+                    error=(
+                        f"用户拒绝执行（approvalId={request.approval_id}）: "
+                        f"{decision.reason or '未提供原因'}"
+                    ),
                 )
 
         working.append(_tool_result_message(result))
@@ -389,7 +451,7 @@ def _tool_result_event_payload(result: ToolResult) -> dict:
         "callId": result.call_id,
         "name": result.name,
         "ok": result.ok,
-        "result": result.value if result.ok else None,
+        "result": result.value,
         "error": result.error,
         "truncated": False,
     }
@@ -411,6 +473,39 @@ def _public_error(exc: Exception) -> tuple[str, str]:
         return "llm_error", "LLM 调用失败，请稍后重试。"
     if isinstance(exc, SessionError):
         return "session_error", "会话状态处理失败。"
-    if isinstance(exc, ToolError):
+    if isinstance(
+        exc,
+        (ToolError, WorkspaceError, ApprovalError, DownloadError, ShellError),
+    ):
         return "tool_error", "工具运行时发生错误。"
     return "internal_error", "Agent 运行时发生内部错误。"
+
+
+def _commit_interrupted_tool_turn(
+    store: SessionStore,
+    session_id: str,
+    snapshot: Session | None,
+    working: list[Message],
+    message: str,
+) -> None:
+    """Best-effort close a protocol-complete tool turn after later failure."""
+    if snapshot is None or not any(item.get("role") == "tool" for item in working):
+        return
+    messages = list(working)
+    if not (
+        messages
+        and messages[-1].get("role") == "assistant"
+        and "tool_calls" not in messages[-1]
+    ):
+        messages.append({"role": "assistant", "content": message})
+    try:
+        store.commit_turn(
+            session_id,
+            expected_revision=snapshot.revision,
+            messages=messages,
+        )
+    except Exception:
+        logger.exception(
+            "failed to preserve interrupted tool turn: session=%s",
+            session_id,
+        )

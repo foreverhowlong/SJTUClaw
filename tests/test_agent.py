@@ -5,13 +5,14 @@ from io import BytesIO
 
 import pytest
 
-from claw.approval import ApprovalDecision
+from claw.approval import ApprovalCoordinator, ApprovalDecision
 from claw.agent import AgentService
 from claw.compaction import CompactionResult
 from claw.context import ContextBuilder
 from claw.errors import LLMError, SessionError, ToolError
 from claw.llm import LLMCompletion, LLMStreamEvent, Message
 from claw.store.attachments import AttachmentStore
+from claw.store.approvals import ApprovalStore
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
 from claw.tools import ToolCall, ToolDefinition, ToolRegistry
@@ -493,11 +494,25 @@ def test_advanced_tool_uses_deny_all_approval_policy(tmp_path) -> None:
     assert "未配置" in llm.calls[1][0][-1]["content"]
 
 
-def test_approved_policy_cannot_bypass_missing_execution_journal(tmp_path) -> None:
+def test_approved_policy_executes_advanced_tool_and_records_result(tmp_path) -> None:
     class ApproveAll:
-        async def authorize(self, session_id, tool, call):
-            del session_id, tool, call
-            return ApprovalDecision(True, "approved for test")
+        def __init__(self):
+            self.recorded = []
+
+        def create(self, session_id, prepared, workspace):
+            from claw.store.approvals import ApprovalRequest
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            return ApprovalRequest("approval_test", session_id, prepared.call.call_id, prepared.call.name, prepared.arguments, workspace, "pending", "", now, now)
+
+        async def wait(self, approval_id):
+            return ApprovalDecision(True, "approved for test", approval_id)
+
+        def record_execution_started(self, approval_id):
+            self.recorded.append((approval_id, "started"))
+
+        def record_execution_result(self, approval_id, result):
+            self.recorded.append((approval_id, result.ok))
 
     executed = []
     registry = ToolRegistry()
@@ -514,21 +529,97 @@ def test_approved_policy_cannot_bypass_missing_execution_journal(tmp_path) -> No
     store = SessionStore(tmp_path / "sessions")
     memories = MemoryStore(tmp_path / "memory")
     session_id = store.create().session_id
+    policy = ApproveAll()
     agent = AgentService(
         FakeLLM([calls(ToolCall("1", "advanced", "{}")), final("done")]),
         store,
         ContextBuilder("rules", "style"),
         memories,
         tool_registry=registry,
-        approval_policy=ApproveAll(),
+        approval_policy=policy,
     )
 
     events = asyncio.run(collect(agent, session_id, "run"))
 
     result = next(event for event in events if event.type == "tool_result")
-    assert result.payload["ok"] is False
-    assert "执行日志" in result.payload["error"]
-    assert executed == []
+    assert result.payload["ok"] is True
+    assert executed == [True]
+    assert policy.recorded == [("approval_test", "started"), ("approval_test", True)]
+
+
+def test_real_approval_coordinator_suspends_then_executes(tmp_path) -> None:
+    executed = []
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            "advanced",
+            "Advanced.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda _args: executed.append("done") or {"success": True},
+            safety_level="advanced",
+            requires_approval=True,
+        )
+    )
+    sessions = SessionStore(tmp_path / "sessions")
+    coordinator = ApprovalCoordinator(
+        ApprovalStore(tmp_path / "approvals"),
+        timeout_seconds=1,
+    )
+    session = sessions.create()
+    agent = AgentService(
+        FakeLLM([calls(ToolCall("call_1", "advanced", "{}")), final("done")]),
+        sessions,
+        ContextBuilder("rules", "style"),
+        MemoryStore(tmp_path / "memory"),
+        tool_registry=registry,
+        approval_policy=coordinator,
+    )
+
+    async def scenario():
+        events = []
+        async for event in agent.run_turn(session.session_id, "run"):
+            events.append(event)
+            if event.type == "approval_required":
+                assert executed == []
+                coordinator.resolve(event.payload["approvalId"], approved=True)
+        return events
+
+    events = asyncio.run(scenario())
+    approval_id = next(
+        event.payload["approvalId"]
+        for event in events
+        if event.type == "approval_required"
+    )
+    assert executed == ["done"]
+    assert coordinator.store.get(approval_id).status == "succeeded"
+    assert sessions.load(session.session_id).messages[2]["name"] == "advanced"
+
+
+def test_llm_failure_after_tool_preserves_real_observation(tmp_path) -> None:
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            "echo",
+            "Echo.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda _args: "real result",
+        )
+    )
+    agent, _, store, _ = make_runtime(
+        tmp_path,
+        [calls(ToolCall("call_1", "echo", "{}")), LLMError("later failure")],
+        registry,
+    )
+    session_id = store.create().session_id
+
+    events = asyncio.run(collect(agent, session_id, "run"))
+
+    assert events[-1].payload["status"] == "failed"
+    persisted = store.load(session_id).messages
+    assert persisted[2]["role"] == "tool"
+    assert "real result" in persisted[2]["content"]
+    assert persisted[-1]["role"] == "assistant"
+    assert "已保留" in persisted[-1]["content"]
 
 
 def test_large_tool_result_is_projected_but_persisted_in_full(tmp_path) -> None:

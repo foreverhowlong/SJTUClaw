@@ -68,6 +68,17 @@ def test_context_builder_loads_packaged_defaults() -> None:
     assert "calm, practical" in messages[0]["content"]
 
 
+def test_context_builder_exposes_current_workspace_state() -> None:
+    configured = ContextBuilder("rules", "style").build(
+        [],
+        workspace="/tmp/project",
+    )
+    missing = ContextBuilder("rules", "style").build([], workspace=None)
+
+    assert "[Current Workspace]\nRoot: /tmp/project" in configured[0]["content"]
+    assert "No workspace is configured" in missing[0]["content"]
+
+
 def test_context_builder_loads_overrides_from_files(tmp_path) -> None:
     system_path = tmp_path / "system.md"
     soul_path = tmp_path / "soul.md"

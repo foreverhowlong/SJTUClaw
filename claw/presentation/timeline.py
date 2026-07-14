@@ -27,6 +27,8 @@ class ToolActivityItem(TypedDict):
     status: ToolStatus
     detail: str
     error: str
+    download: NotRequired[dict[str, Any]]
+    approval: NotRequired[dict[str, Any]]
 
 
 TimelineItem = TextTimelineItem | ToolActivityItem
@@ -37,12 +39,26 @@ _TOOL_ACTIONS = {
     "list_dir": "查看目录",
     "read_file": "读取文件",
     "read_attachment": "读取附件",
+    "create_file": "创建文件",
+    "overwrite_file": "覆盖文件",
+    "edit_file": "编辑文件",
+    "copy_attachment_to_workspace": "拷贝附件",
+    "new_shell": "启动 Shell",
+    "run_command": "运行命令",
+    "create_download": "准备下载",
 }
 
 _TARGET_ARGUMENTS = {
     "list_dir": "path",
     "read_file": "path",
     "read_attachment": "attachment_id",
+    "create_file": "path",
+    "overwrite_file": "path",
+    "edit_file": "path",
+    "copy_attachment_to_workspace": "path",
+    "new_shell": "cwd",
+    "run_command": "command",
+    "create_download": "path",
 }
 
 
@@ -125,7 +141,7 @@ def tool_activity(
         if isinstance(filename, str) and filename.strip():
             target = filename
 
-    return {
+    item: ToolActivityItem = {
         "type": "tool_activity",
         "callId": call_id,
         "toolName": name,
@@ -135,6 +151,19 @@ def tool_activity(
         "detail": _result_detail(name, result) if status == "succeeded" else "",
         "error": error if status == "failed" else "",
     }
+    if name == "create_download" and status == "succeeded" and isinstance(result, dict):
+        download_id = result.get("downloadId")
+        download_url = result.get("downloadUrl")
+        filename = result.get("filename")
+        expires_at = result.get("expiresAt")
+        if all(isinstance(value, str) for value in (download_id, download_url, filename, expires_at)):
+            item["download"] = {
+                "downloadId": download_id,
+                "downloadUrl": download_url,
+                "filename": filename,
+                "expiresAt": expires_at,
+            }
+    return item
 
 
 def _parse_arguments(value: str | dict[str, Any]) -> dict[str, Any]:
@@ -162,7 +191,11 @@ def _parse_tool_result(content: str) -> tuple[bool, Any, str]:
     if payload["ok"]:
         return True, payload.get("result"), ""
     error = payload.get("error")
-    return False, None, error if isinstance(error, str) else "工具执行失败。"
+    return (
+        False,
+        payload.get("result"),
+        error if isinstance(error, str) else "工具执行失败。",
+    )
 
 
 def _result_detail(name: str, result: Any) -> str:
@@ -176,4 +209,16 @@ def _result_detail(name: str, result: Any) -> str:
             return f"{count:,} 字符{suffix}"
     if name == "current_time" and isinstance(result, str):
         return result
+    if name in {"create_file", "overwrite_file", "edit_file", "copy_attachment_to_workspace"} and isinstance(result, dict):
+        message = result.get("message")
+        return message if isinstance(message, str) else ""
+    if name == "new_shell" and isinstance(result, dict):
+        cwd = result.get("cwd")
+        return str(cwd) if cwd else ""
+    if name == "run_command" and isinstance(result, dict):
+        code = result.get("exitCode")
+        return f"exit {code}" if code is not None else ""
+    if name == "create_download" and isinstance(result, dict):
+        filename = result.get("filename")
+        return str(filename) if filename else ""
     return ""
