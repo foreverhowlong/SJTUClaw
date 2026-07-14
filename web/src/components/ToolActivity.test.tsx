@@ -69,7 +69,8 @@ describe("ToolActivity", () => {
       />,
     );
 
-    const link = screen.getByRole("link", { name: /DOWNLOAD report.md/ });
+    expect(screen.getByText("READY TO DOWNLOAD")).toBeTruthy();
+    const link = screen.getByRole("link", { name: "Download report.md" });
     expect(link.getAttribute("href")).toBe("/api/downloads/download_1");
   });
 });

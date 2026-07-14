@@ -16,14 +16,14 @@ export function ToolActivity({
 }) {
   return (
     <article
-      className={`tool-activity tool-activity-${item.status}`}
+      className={`tool-activity tool-activity-${item.status}${item.download ? " tool-activity-with-download" : ""}`}
       aria-label={`${item.action} ${STATUS_LABELS[item.status]}`}
     >
       <div className="tool-activity-line">
         <span className="tool-kind">TOOL</span>
         <strong>{item.action}</strong>
         {item.target && <span className="tool-target">· {item.target}</span>}
-        {item.detail && <span className="tool-detail">· {item.detail}</span>}
+        {item.detail && !item.download && <span className="tool-detail">· {item.detail}</span>}
         <span className="tool-status">
           <span className="tool-status-dot" aria-hidden="true" />
           {STATUS_LABELS[item.status]}
@@ -36,9 +36,23 @@ export function ToolActivity({
         <ApprovalControls item={item} onResolve={onResolveApproval} />
       )}
       {item.download && item.status === "succeeded" && (
-        <a className="download-button" href={item.download.downloadUrl}>
-          DOWNLOAD {item.download.filename}
-        </a>
+        <div className="download-action">
+          <span className="download-glyph" aria-hidden="true">
+            ↓
+          </span>
+          <span className="download-copy">
+            <span>READY TO DOWNLOAD</span>
+            <strong>{item.download.filename}</strong>
+          </span>
+          <a
+            className="download-button"
+            href={item.download.downloadUrl}
+            aria-label={`Download ${item.download.filename}`}
+          >
+            <span>DOWNLOAD</span>
+            <span aria-hidden="true">↘</span>
+          </a>
+        </div>
       )}
     </article>
   );

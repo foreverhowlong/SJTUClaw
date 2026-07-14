@@ -1642,15 +1642,95 @@ summary:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.tool-activity-with-download {
+  width: min(100%, 560px);
+  padding: 8px 10px 10px;
+}
+
+.download-action {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 9px;
+  border-top: 1px solid var(--ash);
+}
+
+.download-glyph {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.download-copy {
+  display: block;
+  min-width: 0;
+}
+
+.download-copy > span {
+  display: block;
+  color: var(--stone);
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  line-height: 1.2;
+}
+
+.download-copy strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 2px;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .download-button {
   display: inline-flex;
-  margin-top: 8px;
-  padding: 8px 12px;
-  border: 1px solid var(--charcoal);
-  color: inherit;
-  background: var(--white);
+  align-items: center;
+  gap: 9px;
+  min-height: 32px;
+  padding: 0 11px 0 13px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--lime);
+  color: var(--ink);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  line-height: 1;
   text-decoration: none;
   cursor: pointer;
+}
+
+.download-button:hover {
+  background: #b2f044;
+}
+
+.download-button span:last-child {
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+@media (max-width: 520px) {
+  .download-action {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .download-button {
+    grid-column: 1 / -1;
+    justify-content: space-between;
+    margin-top: 1px;
+  }
 }
 
 .workspace-panel input {
