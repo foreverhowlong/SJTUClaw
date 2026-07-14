@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from claw.messages import Message
+from claw.skills.models import SkillUsage
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class Session:
     summary: str = ""
     workspace: str | None = None
     _messages: tuple[Message, ...] = field(default_factory=tuple, repr=False)
+    _skill_usages: tuple[SkillUsage, ...] = field(default_factory=tuple, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "summary", self.summary.strip())
@@ -41,3 +43,7 @@ class Session:
     @property
     def message_count(self) -> int:
         return len(self._messages)
+
+    @property
+    def skill_usages(self) -> tuple[SkillUsage, ...]:
+        return self._skill_usages

@@ -63,3 +63,7 @@ class TaskNotFoundError(TaskError):
 
 class TaskConflictError(TaskError):
     """Raised when a scheduled task transition is no longer valid."""
+
+
+class SkillError(ClawError):
+    """Raised when a skill package cannot be discovered or loaded safely."""

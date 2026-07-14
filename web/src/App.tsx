@@ -5,6 +5,8 @@ import {
   deleteSession as deleteSessionRequest,
   getSession,
   listAttachments,
+  listSkills,
+  listSkillUsages,
   listSessions,
   renameSession as renameSessionRequest,
   resolveApproval,
@@ -21,6 +23,8 @@ import type {
   SessionDetail,
   SessionRunState,
   SessionSummary,
+  SkillSummary,
+  SkillUsage,
 } from "./types";
 import { useGatewaySocket } from "./useGatewaySocket";
 import { useMemories } from "./useMemories";
@@ -38,6 +42,9 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
+  const [skills, setSkills] = useState<SkillSummary[]>([]);
+  const [skillUsages, setSkillUsages] = useState<Record<string, SkillUsage[]>>({});
+  const [selectedSkillName, setSelectedSkillName] = useState<string | null>(null);
   const reportTaskError = useCallback((message: string) => setError(message), []);
   const scheduled = useScheduledTasks(reportTaskError);
   const memory = useMemories(reportTaskError);
@@ -49,12 +56,14 @@ export default function App() {
   }, []);
 
   const loadSession = useCallback(async (sessionId: string) => {
-    const [detail, files] = await Promise.all([
+    const [detail, files, usages] = await Promise.all([
       getSession(sessionId),
       listAttachments(sessionId),
+      listSkillUsages(sessionId),
     ]);
     setDetails((previous) => ({ ...previous, [sessionId]: detail }));
     setAttachments((previous) => ({ ...previous, [sessionId]: files }));
+    setSkillUsages((previous) => ({ ...previous, [sessionId]: usages }));
   }, []);
 
   const selectSession = useCallback(
@@ -75,7 +84,12 @@ export default function App() {
     let cancelled = false;
     const bootstrap = async () => {
       try {
-        let items = await refreshSessions();
+        const [initialSkills, initialSessions] = await Promise.all([
+          listSkills(),
+          refreshSessions(),
+        ]);
+        setSkills(initialSkills);
+        let items = initialSessions;
         if (items.length === 0) {
           const created = await createSession();
           items = await refreshSessions();
@@ -234,7 +248,8 @@ export default function App() {
         ),
       }));
       try {
-        sendTurn(requestId, activeSessionId, content);
+        sendTurn(requestId, activeSessionId, content, selectedSkillName ?? undefined);
+        setSelectedSkillName(null);
       } catch (reason) {
         setRuns((previous) => ({
           ...previous,
@@ -243,7 +258,7 @@ export default function App() {
         setError(errorMessage(reason));
       }
     },
-    [activeSessionId, sendTurn],
+    [activeSessionId, selectedSkillName, sendTurn],
   );
 
   const handleUpload = useCallback(
@@ -371,6 +386,8 @@ export default function App() {
             loading={loading}
             onSend={handleSend}
             onResolveApproval={handleResolveApproval}
+            selectedSkillName={selectedSkillName}
+            onClearSkill={() => setSelectedSkillName(null)}
           />
           <InspectorPanel
             className={rightOpen ? "is-open" : ""}
@@ -383,12 +400,16 @@ export default function App() {
             memoriesLoading={memory.loading}
             disabled={!activeSessionId}
             workspace={activeDetail?.workspace ?? null}
+            skills={skills}
+            skillUsages={activeSessionId ? skillUsages[activeSessionId] ?? [] : []}
+            selectedSkillName={selectedSkillName}
             onUpload={handleUpload}
             onSetWorkspace={handleSetWorkspace}
             onCreateTask={scheduled.create}
             onCancelTask={scheduled.cancel}
             onAddMemory={memory.create}
             onDeleteMemory={memory.remove}
+            onSelectSkill={setSelectedSkillName}
             onClose={() => setRightOpen(false)}
           />
         </div>

@@ -85,6 +85,27 @@ class WorkspaceClear:
     pass
 
 
+@dataclass(frozen=True)
+class SkillList:
+    pass
+
+
+@dataclass(frozen=True)
+class SkillShow:
+    name: str
+
+
+@dataclass(frozen=True)
+class SkillUsageCommand:
+    pass
+
+
+@dataclass(frozen=True)
+class SkillRun:
+    name: str
+    task: str
+
+
 CliInput: TypeAlias = (
     ChatInput
     | ExitCommand
@@ -101,6 +122,10 @@ CliInput: TypeAlias = (
     | WorkspaceSet
     | WorkspaceShow
     | WorkspaceClear
+    | SkillList
+    | SkillShow
+    | SkillUsageCommand
+    | SkillRun
 )
 
 
@@ -119,6 +144,10 @@ HELP_TEXT = """Commands:
   /workspace set <path>
   /workspace show
   /workspace clear
+  /skill list
+  /skill show <skill-name>
+  /skill usage
+  /skill <skill-name> <task>
 Prefix a message with // to send a literal leading slash."""
 
 
@@ -166,6 +195,14 @@ def parse_cli_input(raw: str) -> CliInput | None:
             return WorkspaceShow()
         case ["/workspace", "clear"]:
             return WorkspaceClear()
+        case ["/skill", "list"]:
+            return SkillList()
+        case ["/skill", "show", name]:
+            return SkillShow(name)
+        case ["/skill", "usage"]:
+            return SkillUsageCommand()
+        case ["/skill", name, *task] if task:
+            return SkillRun(name, " ".join(task))
         case _:
             raise CommandParseError(
                 f"未知或格式错误的命令: {text}。输入 /help 查看用法。"

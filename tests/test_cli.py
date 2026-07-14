@@ -1,10 +1,12 @@
 import asyncio
+from datetime import datetime, timezone
 from io import StringIO
 
 import claw.cli
 from claw.cli import run_repl
 from claw.compaction import CompactionResult
 from claw.events import AgentEvent
+from claw.skills import SkillRegistry, SkillUsage
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
 
@@ -14,10 +16,18 @@ class FakeAgent:
         self.responses = iter(responses)
         self.compact_responses = iter(compact_responses)
         self.calls: list[tuple[str, str]] = []
+        self.skill_requests = []
         self.compact_calls: list[tuple[str, bool]] = []
 
-    async def run_turn(self, session_id: str, user_input: str):
+    async def run_turn(
+        self,
+        session_id: str,
+        user_input: str,
+        *,
+        skill_request=None,
+    ):
         self.calls.append((session_id, user_input))
+        self.skill_requests.append(skill_request)
         for event in next(self.responses):
             yield event
 
@@ -240,6 +250,58 @@ def test_memory_commands_do_not_call_agent(tmp_path) -> None:
 
     assert agent.calls == []
     assert [item.content for item in memories.list()] == ["用户偏好中文回答。"]
+
+
+def test_skill_commands_list_show_usage_and_run_explicitly(tmp_path) -> None:
+    sessions, memories = stores(tmp_path)
+    current = sessions.create()
+    committed = sessions.commit_turn(
+        current.session_id,
+        expected_revision=0,
+        messages=[
+            {"role": "user", "content": "old task"},
+            {"role": "assistant", "content": "old output"},
+        ],
+        skill_usage=SkillUsage(
+            "usage_cli",
+            "",
+            "course-report",
+            current.session_id,
+            "old task",
+            "explicit",
+            "用户显式选择了该 Skill。",
+            datetime.now(timezone.utc),
+            "completed",
+            "old output",
+        ),
+    )
+    agent = FakeAgent([turn_events(committed.session_id, "new output")])
+    stdout = StringIO()
+
+    run(
+        agent,
+        sessions,
+        memories,
+        skill_registry=SkillRegistry(tmp_path / "skills"),
+        initial_session_id=committed.session_id,
+        input_fn=input_from(
+            [
+                "/skill list",
+                "/skill show course-report",
+                "/skill usage",
+                "/skill course-report new task",
+                "/exit",
+            ]
+        ),
+        stdout=stdout,
+    )
+
+    rendered = stdout.getvalue()
+    assert "course-report  [builtin]" in rendered
+    assert "Skill: course-report" in rendered
+    assert "source=explicit  outcome=completed" in rendered
+    assert agent.calls == [(committed.session_id, "new task")]
+    assert agent.skill_requests[0].name == "course-report"
 
 
 def test_manual_compact_is_awaited_and_printed(tmp_path) -> None:

@@ -17,6 +17,7 @@ class RuntimePaths:
     approvals_dir: Path
     downloads_dir: Path
     logs_dir: Path
+    skills_dir: Path | None = None
     system_prompt_file: Path | None = None
     soul_file: Path | None = None
 
@@ -32,6 +33,7 @@ class RuntimePaths:
             approvals_dir=home / "data" / "approvals",
             downloads_dir=home / "data" / "downloads",
             logs_dir=home / "logs",
+            skills_dir=home / "skills",
             system_prompt_file=_optional_path("CLAW_SYSTEM_PROMPT"),
             soul_file=_optional_path("CLAW_SOUL"),
         )

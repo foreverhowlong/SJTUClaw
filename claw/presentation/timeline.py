@@ -46,6 +46,7 @@ _TOOL_ACTIONS = {
     "restart_shell": "重启 Shell",
     "run_command": "运行命令",
     "create_download": "准备下载",
+    "load_skill": "加载 Skill",
 }
 
 _TARGET_ARGUMENTS = {
@@ -59,6 +60,7 @@ _TARGET_ARGUMENTS = {
     "restart_shell": "cwd",
     "run_command": "command",
     "create_download": "path",
+    "load_skill": "name",
 }
 
 
@@ -221,4 +223,7 @@ def _result_detail(name: str, result: Any) -> str:
     if name == "create_download" and isinstance(result, dict):
         filename = result.get("filename")
         return str(filename) if filename else ""
+    if name == "load_skill" and isinstance(result, dict):
+        reason = result.get("reason")
+        return str(reason) if reason else ""
     return ""

@@ -65,8 +65,18 @@ export interface RuntimeNoticeItem {
   content: string;
 }
 
+export interface SkillActivityItem {
+  type: "skill_activity";
+  name: string;
+  source: "explicit" | "auto";
+  reason: string;
+}
+
 export type PersistedTimelineItem = TextTimelineItem | ToolActivityItem;
-export type TimelineItem = PersistedTimelineItem | RuntimeNoticeItem;
+export type TimelineItem =
+  | PersistedTimelineItem
+  | RuntimeNoticeItem
+  | SkillActivityItem;
 
 export interface AttachmentMetadata {
   attachmentId: string;
@@ -79,6 +89,25 @@ export interface AttachmentMetadata {
 export interface MemoryRecord {
   memoryId: string;
   content: string;
+}
+
+export interface SkillSummary {
+  name: string;
+  description: string;
+  origin: "builtin" | "local";
+}
+
+export interface SkillUsage {
+  usageId: string;
+  turnId: string;
+  skillName: string;
+  sessionId: string;
+  task: string;
+  source: "explicit" | "auto";
+  reason: string;
+  usedAt: string;
+  outcome: "completed" | "failed" | "interrupted";
+  finalOutput: string;
 }
 
 export type ScheduledTaskStatus =

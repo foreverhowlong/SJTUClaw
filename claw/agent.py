@@ -17,6 +17,7 @@ from claw.errors import (
     LLMError,
     SessionError,
     ShellError,
+    SkillError,
     ToolError,
     WorkspaceError,
 )
@@ -24,6 +25,8 @@ from claw.events import AgentEvent
 from claw.llm import LLMStreamEvent
 from claw.messages import Message, MessageSource, TextMessage
 from claw.session import Session
+from claw.skills import SkillRegistry, SkillRequest
+from claw.skills.turn import SkillTurn
 from claw.store.attachments import AttachmentStore
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
@@ -63,6 +66,7 @@ class AgentService:
         approval_policy: ApprovalPolicy | None = None,
         attachment_store: AttachmentStore | None = None,
         tool_provider: SessionToolProvider | None = None,
+        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self._llm = llm
         self._store = store
@@ -73,6 +77,7 @@ class AgentService:
         self._approval_policy = approval_policy or DenyAllPolicy()
         self._attachment_store = attachment_store
         self._tool_provider = tool_provider
+        self._skill_registry = skill_registry
         self._session_locks: dict[str, asyncio.Lock] = {}
 
     async def run_turn(
@@ -81,13 +86,16 @@ class AgentService:
         user_input: str,
         *,
         source: MessageSource | None = None,
+        skill_request: SkillRequest | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Run LLM -> tools -> LLM until a final answer is atomically committed."""
         if not user_input.strip():
             raise ValueError("user_input 不能为空。")
 
         async with self._session_lock(session_id):
-            async for event in self._run_turn(session_id, user_input, source):
+            async for event in self._run_turn(
+                session_id, user_input, source, skill_request
+            ):
                 yield event
 
     async def _run_turn(
@@ -95,22 +103,39 @@ class AgentService:
         session_id: str,
         user_input: str,
         source: MessageSource | None,
+        skill_request: SkillRequest | None,
     ) -> AsyncIterator[AgentEvent]:
 
         yield AgentEvent("turn_start", session_id, {"userInput": user_input})
         snapshot: Session | None = None
         working: list[Message] = []
+        skill_turn: SkillTurn | None = None
         try:
             user_message: TextMessage = {"role": "user", "content": user_input}
             if source is not None:
                 user_message["source"] = source
             working = [user_message]
             snapshot = self._store.load(session_id)
+            if self._skill_registry is not None:
+                skill_turn = SkillTurn(
+                    self._skill_registry.snapshot(),
+                    user_input,
+                    allow_auto=source != "scheduled_task" and skill_request is None,
+                )
+                if skill_request is not None:
+                    skill_turn.apply_explicit(skill_request)
+                    selected = skill_turn.consume_selection_event()
+                    assert selected is not None
+                    yield AgentEvent("skill_selected", session_id, selected)
             tools = self._tools_for_session(snapshot)
+            if skill_turn is not None:
+                skill_tool = skill_turn.tool()
+                if skill_tool is not None:
+                    tools.register(skill_tool)
             definitions = tools.definitions()
             if self._compactor is not None:
                 request_chars = self._request_chars(
-                    session_id, snapshot, working, definitions
+                    session_id, snapshot, working, definitions, skill_turn
                 )
                 if self._compactor.should_compact(request_chars):
                     yield AgentEvent(
@@ -129,6 +154,7 @@ class AgentService:
                         snapshot,
                         working,
                         definitions,
+                        skill_turn,
                     )
                     if self._compactor.should_compact(remaining_chars):
                         # Compaction owns committed turns only. Oversized working
@@ -148,6 +174,7 @@ class AgentService:
                 working,
                 definitions,
                 tools,
+                skill_turn,
             ):
                 yield event
             yield AgentEvent("turn_end", session_id, {"status": "completed"})
@@ -158,6 +185,8 @@ class AgentService:
                 snapshot,
                 working,
                 "工具流程已中断；已完成的 tool result 保留在会话中。",
+                skill_turn=skill_turn,
+                outcome="interrupted",
             )
             raise
         except Exception as exc:
@@ -169,6 +198,8 @@ class AgentService:
                 snapshot,
                 working,
                 f"{message} 已完成的 tool result 已保留。",
+                skill_turn=skill_turn,
+                outcome="failed",
             )
             yield AgentEvent(
                 "error",
@@ -182,6 +213,7 @@ class AgentService:
         session_id: str,
         snapshot: Session,
         working: list[Message],
+        skill_turn: SkillTurn | None = None,
     ) -> list[Message]:
         attachments = (
             self._attachment_store.list(session_id)
@@ -194,9 +226,12 @@ class AgentService:
             snapshot.summary,
             attachments,
         )
+        kwargs = {"skills": skill_turn.context() if skill_turn is not None else None}
         if self._tool_provider is None:
-            return self._context_builder.build(*arguments)
-        return self._context_builder.build(*arguments, workspace=snapshot.workspace)
+            return self._context_builder.build(*arguments, **kwargs)
+        return self._context_builder.build(
+            *arguments, workspace=snapshot.workspace, **kwargs
+        )
 
     def _request_chars(
         self,
@@ -204,8 +239,9 @@ class AgentService:
         snapshot: Session,
         working: list[Message],
         definitions: list[dict],
+        skill_turn: SkillTurn | None = None,
     ) -> int:
-        messages = self._build_context(session_id, snapshot, working)
+        messages = self._build_context(session_id, snapshot, working, skill_turn)
         return serialized_request_chars(messages, definitions)
 
     def _tools_for_session(self, session: Session) -> ToolRegistry:
@@ -228,9 +264,10 @@ class AgentService:
         working: list[Message],
         definitions: list[dict],
         tools: ToolRegistry,
+        skill_turn: SkillTurn | None,
     ) -> AsyncIterator[AgentEvent]:
         while True:
-            messages = self._build_context(session_id, snapshot, working)
+            messages = self._build_context(session_id, snapshot, working, skill_turn)
             completion = None
             async for llm_event in self._llm.stream_chat(messages, definitions):
                 if llm_event.type == "text_delta":
@@ -254,6 +291,7 @@ class AgentService:
                     completion.tool_calls,
                     tools,
                     workspace=snapshot.workspace,
+                    skill_turn=skill_turn,
                 ):
                     yield event
                 continue
@@ -266,6 +304,11 @@ class AgentService:
                 session_id,
                 expected_revision=snapshot.revision,
                 messages=working,
+                skill_usage=(
+                    skill_turn.usage(session_id, "completed", final)
+                    if skill_turn is not None
+                    else None
+                ),
             )
             yield AgentEvent("llm_message", session_id, {"content": final})
             return
@@ -278,6 +321,7 @@ class AgentService:
         tools: ToolRegistry,
         *,
         workspace: str | None,
+        skill_turn: SkillTurn | None,
     ) -> AsyncIterator[AgentEvent]:
         oversized = len(calls) > MAX_TOOL_CALLS_PER_BATCH
         for call in calls:
@@ -288,6 +332,7 @@ class AgentService:
                 tools,
                 oversized=oversized,
                 workspace=workspace,
+                skill_turn=skill_turn,
             ):
                 yield event
 
@@ -300,6 +345,7 @@ class AgentService:
         *,
         oversized: bool,
         workspace: str | None,
+        skill_turn: SkillTurn | None,
     ) -> AsyncIterator[AgentEvent]:
         yield AgentEvent(
             "tool_call",
@@ -379,6 +425,10 @@ class AgentService:
             session_id,
             _tool_result_event_payload(result),
         )
+        if skill_turn is not None:
+            selected = skill_turn.consume_selection_event()
+            if selected is not None:
+                yield AgentEvent("skill_selected", session_id, selected)
 
     async def compact_session(
         self,
@@ -478,6 +528,8 @@ def _public_error(exc: Exception) -> tuple[str, str]:
         (ToolError, WorkspaceError, ApprovalError, DownloadError, ShellError),
     ):
         return "tool_error", "工具运行时发生错误。"
+    if isinstance(exc, SkillError):
+        return "skill_error", str(exc)
     return "internal_error", "Agent 运行时发生内部错误。"
 
 
@@ -487,9 +539,15 @@ def _commit_interrupted_tool_turn(
     snapshot: Session | None,
     working: list[Message],
     message: str,
+    *,
+    skill_turn: SkillTurn | None = None,
+    outcome: str = "failed",
 ) -> None:
     """Best-effort close a protocol-complete tool turn after later failure."""
-    if snapshot is None or not any(item.get("role") == "tool" for item in working):
+    if snapshot is None or (
+        not any(item.get("role") == "tool" for item in working)
+        and (skill_turn is None or skill_turn.selection is None)
+    ):
         return
     messages = list(working)
     if not (
@@ -503,6 +561,11 @@ def _commit_interrupted_tool_turn(
             session_id,
             expected_revision=snapshot.revision,
             messages=messages,
+            skill_usage=(
+                skill_turn.usage(session_id, outcome, messages[-1]["content"])
+                if skill_turn is not None
+                else None
+            ),
         )
     except Exception:
         logger.exception(

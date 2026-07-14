@@ -2047,3 +2047,266 @@ summary:focus-visible {
   cursor: not-allowed;
   opacity: 0.45;
 }
+
+.skills-panel {
+  padding: 18px 16px 24px;
+}
+
+.skills-intro {
+  padding: 0 2px 16px;
+  border-bottom: 1px solid var(--ash);
+}
+
+.skills-intro p {
+  max-width: 31ch;
+  margin: 8px 0 0;
+  color: var(--graphite);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.skills-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.skills-section-heading > span:last-child {
+  color: var(--stone);
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+
+.skill-list {
+  display: grid;
+  gap: 10px;
+  padding: 16px 0 22px;
+}
+
+.skill-card {
+  position: relative;
+  padding: 14px;
+  overflow: hidden;
+  border: 1px solid var(--ash);
+  border-radius: var(--radius-card);
+  background: var(--white);
+}
+
+.skill-card::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 0;
+  background: var(--lime);
+  content: "";
+}
+
+.skill-card.is-selected {
+  border-color: var(--ink);
+}
+
+.skill-card.is-selected::before {
+  width: 5px;
+}
+
+.skill-card-header,
+.skill-card-title,
+.selected-skill-pill {
+  display: flex;
+  align-items: center;
+}
+
+.skill-card-header {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.skill-card-title {
+  min-width: 0;
+  gap: 8px;
+}
+
+.skill-card-title > span {
+  flex: none;
+  color: var(--stone);
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+
+.skill-card-title strong {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.skill-origin {
+  flex: none;
+  color: var(--graphite);
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+}
+
+.skill-card > p {
+  margin: 10px 0 12px;
+  color: var(--graphite);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.skill-card button {
+  width: 100%;
+  min-height: 34px;
+  padding: 8px 11px 8px 13px;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.skill-card button:hover,
+.skill-card button[aria-pressed="true"] {
+  background: var(--lime);
+}
+
+.skill-usage-section {
+  padding-top: 16px;
+  border-top: 1px solid var(--ash);
+}
+
+.skill-usage-section > .muted-copy {
+  margin: 14px 2px 0;
+}
+
+.skill-usage-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.skill-usage-card {
+  padding: 12px 13px;
+  border-radius: var(--radius-inner);
+  background: var(--white);
+}
+
+.skill-usage-topline,
+.skill-usage-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.skill-usage-topline strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-outcome {
+  position: relative;
+  flex: none;
+  padding-left: 9px;
+  color: var(--graphite);
+  font-size: 7px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+
+.skill-outcome::before {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 5px;
+  height: 5px;
+  transform: translateY(-50%);
+  border: 1px solid var(--ink);
+  border-radius: 50%;
+  background: var(--lime);
+  content: "";
+}
+
+.skill-outcome-failed::before,
+.skill-outcome-interrupted::before {
+  background: var(--ink);
+}
+
+.skill-usage-meta {
+  justify-content: flex-start;
+  margin-top: 5px;
+  color: var(--stone);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+}
+
+.skill-usage-meta span + span::before {
+  margin-right: 8px;
+  content: "·";
+}
+
+.skill-usage-card p {
+  margin: 9px 0 0;
+  padding-top: 9px;
+  border-top: 1px solid var(--ash);
+  color: var(--graphite);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.skill-activity {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--ash);
+  border-radius: var(--radius-inner);
+  background: var(--parchment);
+}
+
+.skill-activity p {
+  margin: 7px 0;
+  color: var(--graphite);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.selected-skill-pill {
+  width: fit-content;
+  margin: 0 0 8px 4px;
+  padding: 6px 10px;
+  border-radius: 9999px;
+  background: var(--lime);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.selected-skill-pill button {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.skill-activity strong {
+  display: block;
+  margin-top: 4px;
+}

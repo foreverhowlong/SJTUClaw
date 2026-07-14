@@ -122,4 +122,25 @@ describe("session run state", () => {
     ]);
     expect(state.running).toBe(false);
   });
+
+  it("renders selected skill source and reason as live activity", () => {
+    let state = startRun(undefined, "request_1", "write report");
+    state = applyAgentEvent(
+      state,
+      event("skill_selected", {
+        name: "course-report",
+        source: "auto",
+        reason: "The task is a course report.",
+      }),
+    );
+
+    expect(state.liveTimeline).toEqual([
+      {
+        type: "skill_activity",
+        name: "course-report",
+        source: "auto",
+        reason: "The task is a course report.",
+      },
+    ]);
+  });
 });

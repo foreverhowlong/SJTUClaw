@@ -16,6 +16,7 @@ from claw.store.downloads import DownloadStore
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
 from claw.store.tasks import TaskStore
+from claw.skills import SkillRegistry, SkillUsage
 from claw.workspace import WorkspaceService
 from gateway.app import create_app
 
@@ -23,10 +24,26 @@ from gateway.app import create_app
 class FakeAgent:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.skill_requests = []
 
-    async def run_turn(self, session_id: str, user_input: str, *, source=None):
+    async def run_turn(
+        self, session_id: str, user_input: str, *, source=None, skill_request=None
+    ):
         self.calls.append((session_id, user_input))
+        self.skill_requests.append(skill_request)
         yield AgentEvent("turn_start", session_id, {"userInput": user_input})
+        if skill_request is not None:
+            yield AgentEvent(
+                "skill_selected",
+                session_id,
+                {
+                    "usageId": "usage_test",
+                    "name": skill_request.name,
+                    "description": "test skill",
+                    "source": "explicit",
+                    "reason": "用户显式选择了该 Skill。",
+                },
+            )
         yield AgentEvent("llm_delta", session_id, {"delta": "你好"})
         yield AgentEvent("llm_message", session_id, {"content": "你好"})
         yield AgentEvent("turn_end", session_id, {"status": "completed"})
@@ -92,6 +109,7 @@ class FakeRuntime:
     agent: FakeAgent
     task_store: TaskStore
     scheduler: Scheduler
+    skill_registry: SkillRegistry
 
 
 def make_runtime(tmp_path) -> FakeRuntime:
@@ -110,7 +128,72 @@ def make_runtime(tmp_path) -> FakeRuntime:
             agent,
             poll_interval_seconds=60,
         ),
+        skill_registry=SkillRegistry(tmp_path / "skills"),
     )
+
+
+def test_skill_api_lists_catalog_and_session_usage(tmp_path) -> None:
+    runtime = make_runtime(tmp_path)
+    session = runtime.session_store.create()
+    messages = [
+        {"role": "user", "content": "write report"},
+        {"role": "assistant", "content": "saved report"},
+    ]
+    runtime.session_store.commit_turn(
+        session.session_id,
+        expected_revision=0,
+        messages=messages,
+        skill_usage=SkillUsage(
+            "usage_test",
+            "",
+            "course-report",
+            session.session_id,
+            "write report",
+            "explicit",
+            "用户显式选择了该 Skill。",
+            datetime.now(timezone.utc),
+            "completed",
+            "saved report",
+        ),
+    )
+
+    with TestClient(create_app(runtime)) as client:
+        skills = client.get("/api/skills")
+        detail = client.get("/api/skills/course-report")
+        usage = client.get(f"/api/sessions/{session.session_id}/skill-usages")
+
+    assert skills.status_code == 200
+    assert {item["name"] for item in skills.json()["skills"]} == {
+        "course-report",
+        "material-summary",
+        "presentation-outline",
+    }
+    assert detail.status_code == 200
+    assert detail.json()["origin"] == "builtin"
+    assert "assets/template.md" in detail.json()["resources"]
+    assert usage.json()["usages"][0]["finalOutput"] == "saved report"
+
+
+def test_websocket_accepts_explicit_skill_name(tmp_path) -> None:
+    runtime = make_runtime(tmp_path)
+    session = runtime.session_store.create()
+
+    with TestClient(create_app(runtime)) as client:
+        with client.websocket_connect("/ws/chat") as socket:
+            socket.send_json(
+                {
+                    "type": "run_turn",
+                    "requestId": "request_skill",
+                    "sessionId": session.session_id,
+                    "message": "write report",
+                    "skillName": "course-report",
+                }
+            )
+            frames = [socket.receive_json() for _ in range(6)]
+
+    assert frames[0]["type"] == "session_resolved"
+    assert frames[2]["event"]["type"] == "skill_selected"
+    assert runtime.agent.skill_requests[0].name == "course-report"
 
 
 def add_task8_services(runtime, tmp_path) -> None:

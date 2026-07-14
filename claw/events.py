@@ -16,6 +16,7 @@ AgentEventType = Literal[
     "approval_required",
     "approval_resolved",
     "memory_written",
+    "skill_selected",
     "compaction_started",
     "compaction_done",
     "warning",

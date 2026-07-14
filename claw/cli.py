@@ -26,6 +26,10 @@ from claw.cli_commands import (
     SessionNew,
     SessionRename,
     SessionSwitch,
+    SkillList,
+    SkillRun,
+    SkillShow,
+    SkillUsageCommand,
     WorkspaceClear,
     WorkspaceSet,
     WorkspaceShow,
@@ -41,6 +45,7 @@ from claw.presentation.timeline import (
 )
 from claw.runtime import build_runtime
 from claw.session import Session
+from claw.skills import SkillRegistry, SkillRequest
 from claw.shell import ShellManager
 from claw.store.memory import MemoryStore
 from claw.store.sessions import SessionStore
@@ -52,7 +57,13 @@ InputFunction = Callable[[str], str | Awaitable[str]]
 
 
 class AgentRuntime(Protocol):
-    def run_turn(self, session_id: str, user_input: str) -> AsyncIterator[AgentEvent]: ...
+    def run_turn(
+        self,
+        session_id: str,
+        user_input: str,
+        *,
+        skill_request: SkillRequest | None = None,
+    ) -> AsyncIterator[AgentEvent]: ...
 
     async def compact_session(
         self,
@@ -69,6 +80,7 @@ async def run_repl(
     workspace_service: WorkspaceService | None = None,
     approval_coordinator: ApprovalCoordinator | None = None,
     shell_manager: ShellManager | None = None,
+    skill_registry: SkillRegistry | None = None,
     *,
     initial_session_id: str | None = None,
     input_fn: InputFunction | None = None,
@@ -165,6 +177,31 @@ async def run_repl(
                     raise ClawError("当前 CLI 未配置 workspace service。")
                 workspace_service.clear(current_session_id)
                 print("Workspace cleared.", file=output)
+            elif isinstance(parsed, SkillList):
+                if skill_registry is None:
+                    raise ClawError("当前 CLI 未配置 skill registry。")
+                _print_skills(skill_registry, output)
+            elif isinstance(parsed, SkillShow):
+                if skill_registry is None:
+                    raise ClawError("当前 CLI 未配置 skill registry。")
+                package = skill_registry.get(parsed.name)
+                print(f"Skill: {package.summary.name}", file=output)
+                print(f"Description: {package.summary.description}", file=output)
+                print(f"Origin: {package.summary.origin}", file=output)
+            elif isinstance(parsed, SkillUsageCommand):
+                _print_skill_usages(session_store.load(current_session_id), output)
+            elif isinstance(parsed, SkillRun):
+                await _render_turn(
+                    agent.run_turn(
+                        current_session_id,
+                        parsed.task,
+                        skill_request=SkillRequest.explicit(parsed.name),
+                    ),
+                    output,
+                    error_output,
+                    approval_coordinator=approval_coordinator,
+                    input_fn=read_input,
+                )
         except KeyboardInterrupt:
             print("\n已中断。", file=error_output)
             return 130
@@ -225,6 +262,31 @@ def _print_memories(store: MemoryStore, output: TextIO) -> None:
         print("(empty)", file=output)
     for memory in memories:
         print(f"{memory.memory_id}  {memory.content}", file=output)
+
+
+def _print_skills(registry: SkillRegistry, output: TextIO) -> None:
+    skills = registry.list()
+    print("Skills:", file=output)
+    if not skills:
+        print("(empty)", file=output)
+    for skill in skills:
+        print(f"{skill.name}  [{skill.origin}]  {skill.description}", file=output)
+
+
+def _print_skill_usages(session: Session, output: TextIO) -> None:
+    print("Skill usage:", file=output)
+    if not session.skill_usages:
+        print("(empty)", file=output)
+    for usage in session.skill_usages:
+        used = usage.used_at.astimezone().strftime("%Y-%m-%d %H:%M")
+        print(
+            f"{usage.skill_name}  source={usage.source}  outcome={usage.outcome}  "
+            f"used={used}",
+            file=output,
+        )
+        print(f"  reason: {usage.reason}", file=output)
+        print(f"  task: {usage.task}", file=output)
+        print(f"  output: {usage.final_output}", file=output)
 
 
 def _print_compaction(
@@ -344,6 +406,12 @@ async def _render_turn(
         elif event.type == "approval_resolved":
             # The following tool_result is the durable, user-relevant outcome.
             continue
+        elif event.type == "skill_selected":
+            print(
+                f"Skill> {event.payload['name']} "
+                f"[{event.payload['source']}] · {event.payload['reason']}",
+                file=output,
+            )
         elif event.type == "llm_message":
             if streaming:
                 print(file=output)
@@ -402,6 +470,7 @@ def main(argv: list[str] | None = None) -> int:
                 runtime.workspace_service,
                 runtime.approval_coordinator,
                 runtime.shell_manager,
+                runtime.skill_registry,
             )
         )
     except KeyboardInterrupt:

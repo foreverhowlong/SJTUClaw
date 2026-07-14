@@ -19,6 +19,8 @@ interface Props {
   loading: boolean;
   onSend: (content: string) => void;
   onResolveApproval?: (approvalId: string, approved: boolean, reason: string) => Promise<void>;
+  selectedSkillName?: string | null;
+  onClearSkill?: () => void;
 }
 
 export function ConversationPane({
@@ -28,6 +30,8 @@ export function ConversationPane({
   loading,
   onSend,
   onResolveApproval,
+  selectedSkillName,
+  onClearSkill,
 }: Props) {
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
@@ -103,6 +107,12 @@ export function ConversationPane({
       </div>
 
       <div className="composer-wrap">
+        {selectedSkillName && (
+          <div className="selected-skill-pill">
+            <span>SKILL / {selectedSkillName}</span>
+            <button type="button" onClick={onClearSkill} aria-label="取消使用 Skill">×</button>
+          </div>
+        )}
         <label className="composer" aria-label="发送消息">
           <textarea
             value={draft}
@@ -156,6 +166,15 @@ function TimelineEntry({
       <article className={`runtime-notice runtime-notice-${item.level}`}>
         <span className="micro-label">RUNTIME / {item.level}</span>
         <p>{item.content}</p>
+      </article>
+    );
+  }
+  if (item.type === "skill_activity") {
+    return (
+      <article className="skill-activity">
+        <span className="micro-label">SKILL / {item.source}</span>
+        <strong>{item.name}</strong>
+        <p>{item.reason}</p>
       </article>
     );
   }

@@ -5,6 +5,8 @@ import type {
   ScheduledTask,
   SessionDetail,
   SessionSummary,
+  SkillSummary,
+  SkillUsage,
 } from "./types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -135,4 +137,16 @@ export function createMemory(content: string): Promise<MemoryRecord> {
 
 export function deleteMemory(memoryId: string): Promise<void> {
   return request<void>(`/api/memories/${memoryId}`, { method: "DELETE" });
+}
+
+export async function listSkills(): Promise<SkillSummary[]> {
+  const body = await request<{ skills: SkillSummary[] }>("/api/skills");
+  return body.skills;
+}
+
+export async function listSkillUsages(sessionId: string): Promise<SkillUsage[]> {
+  const body = await request<{ usages: SkillUsage[] }>(
+    `/api/sessions/${sessionId}/skill-usages`,
+  );
+  return body.usages;
 }

@@ -6,6 +6,10 @@ from claw.cli_commands import (
     MemoryAdd,
     SessionList,
     SessionRename,
+    SkillList,
+    SkillRun,
+    SkillShow,
+    SkillUsageCommand,
     WorkspaceClear,
     WorkspaceSet,
     WorkspaceShow,
@@ -38,6 +42,15 @@ def test_workspace_commands_are_parsed_locally() -> None:
     )
     assert isinstance(parse_cli_input("/workspace show"), WorkspaceShow)
     assert isinstance(parse_cli_input("/workspace clear"), WorkspaceClear)
+
+
+def test_skill_commands_are_parsed_locally() -> None:
+    assert isinstance(parse_cli_input("/skill list"), SkillList)
+    assert parse_cli_input("/skill show course-report") == SkillShow("course-report")
+    assert isinstance(parse_cli_input("/skill usage"), SkillUsageCommand)
+    assert parse_cli_input('/skill course-report "write a report"') == SkillRun(
+        "course-report", "write a report"
+    )
 
 
 def test_unknown_and_malformed_commands_raise_parse_error() -> None:

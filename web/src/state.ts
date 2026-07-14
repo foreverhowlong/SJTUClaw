@@ -89,6 +89,23 @@ export function applyAgentEvent(
       ],
     };
   }
+  if (event.type === "skill_selected") {
+    const name = event.payload.name;
+    const source = event.payload.source;
+    const reason = event.payload.reason;
+    if (
+      typeof name !== "string" ||
+      (source !== "explicit" && source !== "auto") ||
+      typeof reason !== "string"
+    ) return state;
+    return {
+      ...state,
+      liveTimeline: [
+        ...state.liveTimeline,
+        { type: "skill_activity", name, source, reason },
+      ],
+    };
+  }
   return {
     ...state,
     running: event.type === "turn_end" ? false : state.running,

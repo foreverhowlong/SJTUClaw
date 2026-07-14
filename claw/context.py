@@ -10,6 +10,7 @@ from pathlib import Path
 
 from claw.errors import ConfigError
 from claw.messages import Message
+from claw.skills.models import SkillContext, SkillPackage
 from claw.store.attachments import AttachmentMetadata
 from claw.store.memory import MemoryRecord
 
@@ -56,6 +57,7 @@ class ContextBuilder:
         session_summary: str = "",
         attachments: Sequence[AttachmentMetadata] = (),
         workspace: str | None | object = _WORKSPACE_OMITTED,
+        skills: SkillContext | None = None,
     ) -> list[Message]:
         stable_sections = [
             f"[System Prompt]\n{self._system_prompt}",
@@ -66,6 +68,23 @@ class ContextBuilder:
                 f"[{memory.memory_id}]\n{memory.content}" for memory in memories
             )
             stable_sections.append(f"[Memory]\n{rendered_memories}")
+        if skills is not None and skills.available:
+            rendered_skills = "\n".join(
+                f"- name: {item.name}\n  description: {item.description}"
+                for item in skills.available
+            )
+            stable_sections.append(
+                "[Available Skills]\n"
+                "Only the following lightweight index is active. If one skill is "
+                "clearly useful and no skill is selected yet, call load_skill with "
+                "its exact name and a concise user-facing reason. Do not claim to "
+                "have loaded a skill before the tool succeeds.\n"
+                f"{rendered_skills}"
+            )
+        if skills is not None and skills.selected is not None:
+            stable_sections.append(
+                _render_selected_skill(skills.selected.package, skills.selected.source)
+            )
         normalized_summary = session_summary.strip()
         if normalized_summary:
             stable_sections.append(f"[Session Summary]\n{normalized_summary}")
@@ -103,6 +122,27 @@ class ContextBuilder:
             {"role": "system", "content": "\n\n".join(stable_sections)},
             *project_messages(messages),
         ]
+
+
+def _render_selected_skill(package: SkillPackage, source: str) -> str:
+    sections = [
+        "[Selected Skill]",
+        f"name: {package.summary.name}",
+        f"description: {package.summary.description}",
+        f"source: {source}",
+        "instructions:",
+        package.instructions,
+    ]
+    if package.resources:
+        sections.append("resources:")
+        for resource in package.resources:
+            sections.append(f"\n## {resource.path}")
+            sections.append(
+                resource.content
+                if resource.content is not None
+                else "[binary resource omitted from model context]"
+            )
+    return "\n".join(sections)
 
 
 def project_messages(

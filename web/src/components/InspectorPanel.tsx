@@ -6,11 +6,14 @@ import type {
   MemoryRecord,
   ScheduledTask,
   SessionSummary,
+  SkillSummary,
+  SkillUsage,
 } from "../types";
 import { ScheduledTasksPanel } from "./ScheduledTasksPanel";
 import { MemoryPanel } from "./MemoryPanel";
+import { SkillsPanel } from "./SkillsPanel";
 
-type InspectorSection = "files" | "memory" | "tasks" | "workspace";
+type InspectorSection = "files" | "memory" | "skills" | "tasks" | "workspace";
 
 const SECTION_GROUPS: Array<{
   label: string;
@@ -25,7 +28,10 @@ const SECTION_GROUPS: Array<{
   },
   {
     label: "AGENT",
-    items: [{ id: "memory", label: "MEMORY" }],
+    items: [
+      { id: "memory", label: "MEMORY" },
+      { id: "skills", label: "SKILLS" },
+    ],
   },
   {
     label: "AUTOMATION",
@@ -44,12 +50,16 @@ interface Props {
   memoriesLoading: boolean;
   disabled: boolean;
   workspace: string | null;
+  skills: SkillSummary[];
+  skillUsages: SkillUsage[];
+  selectedSkillName: string | null;
   onUpload: (file: File) => Promise<void>;
   onSetWorkspace: (path: string | null) => Promise<void>;
   onCreateTask: (input: CreateScheduledTaskInput) => Promise<unknown>;
   onCancelTask: (taskId: string) => Promise<unknown>;
   onAddMemory: (content: string) => Promise<unknown>;
   onDeleteMemory: (memoryId: string) => Promise<unknown>;
+  onSelectSkill: (name: string) => void;
   onClose: () => void;
 }
 
@@ -64,12 +74,16 @@ export function InspectorPanel({
   memoriesLoading,
   disabled,
   workspace,
+  skills,
+  skillUsages,
+  selectedSkillName,
   onUpload,
   onSetWorkspace,
   onCreateTask,
   onCancelTask,
   onAddMemory,
   onDeleteMemory,
+  onSelectSkill,
   onClose,
 }: Props) {
   const [uploading, setUploading] = useState(false);
@@ -84,10 +98,11 @@ export function InspectorPanel({
     () => ({
       files: String(attachments.length),
       memory: String(memories.length),
+      skills: String(skills.length),
       tasks: String(tasks.length),
       workspace: workspace ? "SET" : "NOT SET",
     }),
-    [attachments.length, memories.length, tasks.length, workspace],
+    [attachments.length, memories.length, skills.length, tasks.length, workspace],
   );
   const activeSection = SECTION_GROUPS.flatMap((group) =>
     group.items.map((item) => ({ ...item, group: group.label })),
@@ -263,6 +278,13 @@ export function InspectorPanel({
             loading={memoriesLoading}
             onCreate={onAddMemory}
             onDelete={onDeleteMemory}
+          />
+        ) : section === "skills" ? (
+          <SkillsPanel
+            skills={skills}
+            usages={skillUsages}
+            selectedSkillName={selectedSkillName}
+            onSelect={onSelectSkill}
           />
         ) : (
           <ScheduledTasksPanel

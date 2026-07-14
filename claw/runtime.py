@@ -16,6 +16,7 @@ from claw.logging_config import configure_logging
 from claw.paths import RuntimePaths
 from claw.scheduler import Scheduler
 from claw.shell import ShellManager
+from claw.skills import SkillRegistry
 from claw.store.approvals import ApprovalStore
 from claw.store.attachments import AttachmentStore
 from claw.store.memory import MemoryStore
@@ -38,6 +39,7 @@ class ClawRuntime:
     download_store: DownloadStore
     workspace_service: WorkspaceService
     shell_manager: ShellManager
+    skill_registry: SkillRegistry
     agent: AgentService
     scheduler: Scheduler
 
@@ -56,6 +58,7 @@ def build_runtime(paths: RuntimePaths | None = None) -> ClawRuntime:
     download_store = DownloadStore(resolved_paths.downloads_dir)
     workspace_service = WorkspaceService(session_store)
     shell_manager = ShellManager(timeout_seconds=25)
+    skill_registry = SkillRegistry(resolved_paths.skills_dir)
     tool_provider = SessionToolProvider(
         attachment_store,
         download_store,
@@ -75,6 +78,7 @@ def build_runtime(paths: RuntimePaths | None = None) -> ClawRuntime:
         approval_policy=approval_coordinator,
         attachment_store=attachment_store,
         tool_provider=tool_provider,
+        skill_registry=skill_registry,
     )
     scheduler = Scheduler(task_store, session_store, agent)
     return ClawRuntime(
@@ -88,6 +92,7 @@ def build_runtime(paths: RuntimePaths | None = None) -> ClawRuntime:
         download_store=download_store,
         workspace_service=workspace_service,
         shell_manager=shell_manager,
+        skill_registry=skill_registry,
         agent=agent,
         scheduler=scheduler,
     )

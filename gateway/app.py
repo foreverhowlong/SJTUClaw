@@ -24,6 +24,7 @@ from claw.errors import (
     DownloadError,
     MemoryError,
     SessionError,
+    SkillError,
     TaskConflictError,
     TaskError,
     TaskNotFoundError,
@@ -32,6 +33,7 @@ from claw.events import AgentEvent
 from claw.presentation.timeline import build_conversation_timeline, tool_activity
 from claw.runtime import ClawRuntime, build_runtime, serve_runtime
 from claw.session import Session
+from claw.skills import SkillRequest
 from claw.store.sessions import SessionSummary
 from gateway.realtime import GatewayConnection, GatewayConnectionHub
 from gateway.task_routes import router as task_router
@@ -39,6 +41,7 @@ from gateway.approval_routes import router as approval_router
 from gateway.download_routes import router as download_router
 from gateway.memory_routes import router as memory_router
 from gateway.workspace_routes import router as workspace_router
+from gateway.skill_routes import router as skill_router
 
 
 logger = logging.getLogger(__name__)
@@ -128,6 +131,11 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
     async def handle_task_error(_request: Request, exc: TaskError):
         return _error_response(400, "task_error", str(exc))
 
+    @app.exception_handler(SkillError)
+    async def handle_skill_error(_request: Request, exc: SkillError):
+        status = 404 if "不存在" in str(exc) else 400
+        return _error_response(status, "skill_error", str(exc))
+
     @app.exception_handler(ClawError)
     async def handle_claw_error(_request: Request, exc: ClawError):
         return _error_response(400, "claw_error", str(exc))
@@ -208,7 +216,7 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
                 request_id = f"request_{uuid4().hex[:12]}"
                 try:
                     value = json.loads(raw)
-                    request_id, session_id, message = _parse_turn_request(
+                    request_id, session_id, message, skill_name = _parse_turn_request(
                         value,
                         request_id,
                     )
@@ -229,10 +237,16 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
                         }
                     )
                     live_tools: dict[str, tuple[str, str]] = {}
-                    async for event in active_runtime.agent.run_turn(
-                        session_id,
-                        message,
-                    ):
+                    turn_events = (
+                        active_runtime.agent.run_turn(session_id, message)
+                        if skill_name is None
+                        else active_runtime.agent.run_turn(
+                            session_id,
+                            message,
+                            skill_request=SkillRequest.explicit(skill_name),
+                        )
+                    )
+                    async for event in turn_events:
                         await connection.send_json(
                             {
                                 "type": "agent_event",
@@ -267,6 +281,7 @@ def create_app(runtime: ClawRuntime | None = None) -> FastAPI:
     app.include_router(workspace_router)
     app.include_router(approval_router)
     app.include_router(download_router)
+    app.include_router(skill_router)
 
     web_dist = Path(__file__).resolve().parent.parent / "web" / "dist"
     if web_dist.is_dir():
@@ -369,7 +384,7 @@ def _web_event(
 def _parse_turn_request(
     value: Any,
     fallback_request_id: str,
-) -> tuple[str, str | None, str]:
+) -> tuple[str, str | None, str, str | None]:
     if not isinstance(value, dict) or value.get("type") != "run_turn":
         raise ValueError("WebSocket 消息 type 必须是 run_turn。")
     request_id = value.get("requestId", fallback_request_id)
@@ -383,7 +398,17 @@ def _parse_turn_request(
     message = value.get("message")
     if not isinstance(message, str) or not message.strip():
         raise ValueError("message 必须是非空字符串。")
-    return request_id.strip(), session_id, message.strip()
+    skill_name = value.get("skillName")
+    if skill_name is not None and (
+        not isinstance(skill_name, str) or not skill_name.strip()
+    ):
+        raise ValueError("skillName 必须是非空字符串或 null。")
+    return (
+        request_id.strip(),
+        session_id,
+        message.strip(),
+        skill_name.strip() if isinstance(skill_name, str) else None,
+    )
 
 
 async def _send_gateway_error(

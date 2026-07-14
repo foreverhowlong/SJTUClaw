@@ -54,7 +54,7 @@ export function useGatewaySocket(onMessage: MessageHandler) {
   }, []);
 
   const sendTurn = useCallback(
-    (requestId: string, sessionId: string, message: string) => {
+    (requestId: string, sessionId: string, message: string, skillName?: string) => {
       const socket = socketRef.current;
       if (!socket || socket.readyState !== WebSocket.OPEN) {
         throw new Error("Gateway 尚未连接，请稍后重试。");
@@ -65,6 +65,7 @@ export function useGatewaySocket(onMessage: MessageHandler) {
           requestId,
           sessionId,
           message,
+          ...(skillName ? { skillName } : {}),
         }),
       );
     },

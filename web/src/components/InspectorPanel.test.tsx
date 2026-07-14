@@ -21,12 +21,16 @@ describe("InspectorPanel section selector", () => {
         memoriesLoading={false}
         disabled={false}
         workspace={null}
+        skills={[]}
+        skillUsages={[]}
+        selectedSkillName={null}
         onUpload={vi.fn()}
         onSetWorkspace={vi.fn()}
         onCreateTask={vi.fn()}
         onCancelTask={vi.fn()}
         onAddMemory={vi.fn()}
         onDeleteMemory={vi.fn()}
+        onSelectSkill={vi.fn()}
         onClose={vi.fn()}
       />,
     );

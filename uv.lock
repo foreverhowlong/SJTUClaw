@@ -555,6 +555,7 @@ dependencies = [
     { name = "openai" },
     { name = "prompt-toolkit" },
     { name = "python-multipart" },
+    { name = "pyyaml" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -571,6 +572,7 @@ requires-dist = [
     { name = "openai", specifier = ">=2.44.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.52" },
     { name = "python-multipart", specifier = ">=0.0.20" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.35" },
 ]
 

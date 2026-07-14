@@ -8,7 +8,7 @@ import re
 import shutil
 from collections.abc import Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -19,6 +19,7 @@ from filelock import FileLock, Timeout
 from claw.errors import SessionConflictError, SessionError
 from claw.messages import Message
 from claw.session import Session
+from claw.skills.models import SkillUsage
 from claw.store.session_log import parse_datetime, read_message_log
 from claw.store.session_messages import validate_history, validate_turn
 
@@ -98,6 +99,7 @@ class SessionStore:
         *,
         expected_revision: int,
         messages: Sequence[Message],
+        skill_usage: SkillUsage | None = None,
     ) -> Session:
         committed_messages = validate_turn(messages)
         with self._locked(session_id):
@@ -109,13 +111,22 @@ class SessionStore:
                 )
 
             committed_at = datetime.now(timezone.utc)
+            turn_id = f"turn_{uuid4().hex[:12]}"
+            committed_usage = _prepare_skill_usage(
+                skill_usage,
+                session_id=session_id,
+                turn_id=turn_id,
+                messages=committed_messages,
+            )
             record = {
                 "type": "turn",
                 "revision": snapshot.revision + 1,
-                "turnId": f"turn_{uuid4().hex[:12]}",
+                "turnId": turn_id,
                 "committedAt": committed_at.isoformat(),
                 "messages": committed_messages,
             }
+            if committed_usage is not None:
+                record["skillUsage"] = committed_usage.to_dict()
             self._append_record(
                 self._session_dir(session_id) / "messages.jsonl",
                 record,
@@ -129,6 +140,12 @@ class SessionStore:
                 summary=snapshot.summary,
                 workspace=snapshot.workspace,
                 _messages=tuple([*snapshot.messages, *committed_messages]),
+                _skill_usages=tuple(
+                    [
+                        *snapshot.skill_usages,
+                        *([committed_usage] if committed_usage is not None else []),
+                    ]
+                ),
             )
 
     def commit_compaction(
@@ -181,6 +198,7 @@ class SessionStore:
                 summary=normalized_summary,
                 workspace=snapshot.workspace,
                 _messages=tuple(retained),
+                _skill_usages=snapshot.skill_usages,
             )
 
     def rename(self, session_id: str, title: str) -> Session:
@@ -199,6 +217,7 @@ class SessionStore:
                 summary=snapshot.summary,
                 workspace=snapshot.workspace,
                 _messages=tuple(snapshot.messages),
+                _skill_usages=snapshot.skill_usages,
             )
             try:
                 self._atomic_write(
@@ -223,6 +242,7 @@ class SessionStore:
                 summary=snapshot.summary,
                 workspace=normalized or None,
                 _messages=tuple(snapshot.messages),
+                _skill_usages=snapshot.skill_usages,
             )
             try:
                 self._atomic_write(
@@ -254,6 +274,11 @@ class SessionStore:
             raise SessionError(
                 f"Session 数据损坏: {meta_path} 中的 sessionId 与目录名不一致。"
             )
+        if any(usage.session_id != session_id for usage in log.skill_usages):
+            raise SessionError(
+                f"Session 数据损坏: {messages_path} 中的 skillUsage sessionId "
+                "与目录名不一致。"
+            )
         title = meta.get("title")
         if not isinstance(title, str) or not title.strip():
             raise SessionError(f"Session 数据损坏: {meta_path} 中的 title 无效。")
@@ -277,6 +302,7 @@ class SessionStore:
             summary=log.summary,
             workspace=_read_optional_workspace(meta, meta_path),
             _messages=log.messages,
+            _skill_usages=log.skill_usages,
         )
 
     def _append_record(self, path: Path, record: dict[str, Any]) -> None:
@@ -400,3 +426,26 @@ def _read_optional_workspace(meta: dict[str, Any], path: Path) -> str | None:
     if not isinstance(value, str) or not value.strip():
         raise SessionError(f"Session 数据损坏: {path} 中的 workspace 无效。")
     return value.strip()
+
+
+def _prepare_skill_usage(
+    usage: SkillUsage | None,
+    *,
+    session_id: str,
+    turn_id: str,
+    messages: Sequence[Message],
+) -> SkillUsage | None:
+    if usage is None:
+        return None
+    final_output = messages[-1].get("content")
+    task = messages[0].get("content")
+    if (
+        usage.session_id != session_id
+        or not isinstance(task, str)
+        or usage.task != task
+        or not isinstance(final_output, str)
+        or usage.final_output != final_output
+        or usage.turn_id
+    ):
+        raise SessionError("skill usage 与待提交 turn 不一致。")
+    return replace(usage, turn_id=turn_id)

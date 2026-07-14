@@ -34,6 +34,8 @@ vi.mock("./api", () => ({
   createScheduledTask: vi.fn(),
   cancelScheduledTask: vi.fn(),
   listMemories: vi.fn().mockResolvedValue([]),
+  listSkills: vi.fn().mockResolvedValue([]),
+  listSkillUsages: vi.fn().mockResolvedValue([]),
   createMemory: vi.fn(),
   deleteMemory: vi.fn(),
 }));

@@ -15,7 +15,7 @@ from claw.tools.schema import validate_arguments, validate_input_schema
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
-SafetyLevel = Literal["read_only", "advanced", "download"]
+SafetyLevel = Literal["read_only", "advanced", "download", "context_extension"]
 DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,14 @@ class ToolDefinition:
             raise ToolError(f"advanced tool 必须要求 approval: {self.name}。")
         if self.safety_level == "download" and self.requires_approval:
             raise ToolError(f"download tool 不进入显式 approval: {self.name}。")
-        if self.safety_level not in {"read_only", "advanced", "download"}:
+        if self.safety_level == "context_extension" and not self.requires_approval:
+            raise ToolError(f"context_extension tool 必须要求 approval: {self.name}。")
+        if self.safety_level not in {
+            "read_only",
+            "advanced",
+            "download",
+            "context_extension",
+        }:
             raise ToolError(f"tool safety level 无效: {self.name}。")
         validate_input_schema(self.name, self.input_schema)
 

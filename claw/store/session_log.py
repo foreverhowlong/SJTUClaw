@@ -10,6 +10,7 @@ from typing import Any
 
 from claw.errors import SessionError
 from claw.messages import Message
+from claw.skills.models import SkillUsage
 from claw.store.session_messages import (
     copy_message,
     is_legacy_message,
@@ -24,6 +25,7 @@ class MessageLog:
     summary: str
     revision: int
     last_committed_at: datetime | None
+    skill_usages: tuple[SkillUsage, ...]
 
 
 def read_message_log(path: Path) -> MessageLog:
@@ -38,6 +40,7 @@ def read_message_log(path: Path) -> MessageLog:
     summary = ""
     revision = 0
     last_committed_at: datetime | None = None
+    skill_usages: list[SkillUsage] = []
     for line_number, line in enumerate(lines, start=1):
         record = _decode_record(line, path, line_number)
         if is_legacy_message(record):
@@ -47,8 +50,12 @@ def read_message_log(path: Path) -> MessageLog:
 
         _validate_record_header(record, path, line_number, revision + 1)
         if record["type"] == "turn":
-            committed_at, new_messages = _read_turn_record(record, path, line_number)
+            committed_at, new_messages, usage = _read_turn_record(
+                record, path, line_number
+            )
             messages.extend(new_messages)
+            if usage is not None:
+                skill_usages.append(usage)
         else:
             committed_at, summary, messages = _read_compaction_record(
                 record,
@@ -59,7 +66,9 @@ def read_message_log(path: Path) -> MessageLog:
         revision += 1
         last_committed_at = committed_at
 
-    return MessageLog(tuple(messages), summary, revision, last_committed_at)
+    return MessageLog(
+        tuple(messages), summary, revision, last_committed_at, tuple(skill_usages)
+    )
 
 
 def parse_datetime(value: Any, path: Path, field: str) -> datetime:
@@ -106,7 +115,7 @@ def _read_turn_record(
     record: dict[str, Any],
     path: Path,
     line_number: int,
-) -> tuple[datetime, list[Message]]:
+) -> tuple[datetime, list[Message], SkillUsage | None]:
     messages = record.get("messages")
     if not isinstance(messages, list):
         raise SessionError(
@@ -123,7 +132,56 @@ def _read_turn_record(
         path,
         f"第 {line_number} 行 committedAt",
     )
-    return committed_at, validated
+    usage = _read_skill_usage(record, validated, path, line_number)
+    return committed_at, validated, usage
+
+
+def _read_skill_usage(
+    record: dict[str, Any],
+    messages: list[Message],
+    path: Path,
+    line_number: int,
+) -> SkillUsage | None:
+    value = record.get("skillUsage")
+    if value is None:
+        return None
+    try:
+        if not isinstance(value, dict):
+            raise TypeError("skillUsage is not an object")
+        source = value["source"]
+        outcome = value["outcome"]
+        if source not in {"explicit", "auto"}:
+            raise ValueError("source invalid")
+        if outcome not in {"completed", "failed", "interrupted"}:
+            raise ValueError("outcome invalid")
+        usage = SkillUsage(
+            usage_id=str(value["usageId"]),
+            turn_id=str(value["turnId"]),
+            skill_name=str(value["skillName"]),
+            session_id=str(value["sessionId"]),
+            task=str(value["task"]),
+            source=source,
+            reason=str(value["reason"]),
+            used_at=datetime.fromisoformat(str(value["usedAt"])),
+            outcome=outcome,
+            final_output=str(value["finalOutput"]),
+        )
+        if (
+            not usage.usage_id.startswith("usage_")
+            or usage.turn_id != record.get("turnId")
+            or not usage.skill_name
+            or not usage.session_id
+            or not usage.reason
+            or usage.task != messages[0]["content"]
+            or usage.final_output != messages[-1]["content"]
+            or usage.used_at.tzinfo is None
+        ):
+            raise ValueError("skillUsage fields inconsistent")
+        return usage
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SessionError(
+            f"Session 数据损坏: {path} 第 {line_number} 行 skillUsage 无效: {exc}"
+        ) from exc
 
 
 def _read_compaction_record(

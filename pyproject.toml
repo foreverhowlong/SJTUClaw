@@ -9,6 +9,7 @@ dependencies = [
     "openai>=2.44.0",
     "prompt-toolkit>=3.0.52",
     "python-multipart>=0.0.20",
+    "pyyaml>=6.0.2",
     "uvicorn[standard]>=0.35",
 ]
 
@@ -33,4 +34,9 @@ build-backend = "setuptools.build_meta"
 include = ["claw*", "gateway*"]
 
 [tool.setuptools.package-data]
-claw = ["prompts/*.md"]
+claw = [
+    "prompts/*.md",
+    "builtin_skills/*/SKILL.md",
+    "builtin_skills/*/assets/*",
+    "builtin_skills/*/references/*",
+]
